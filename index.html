@@ -217,6 +217,7 @@ const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this
   : e.code === 3 ? 'Finding your location took too long. Go near a window, switch on GPS, and try again.'
   : 'Could not find your location. Switch on location and try again.';
 let busy = false, myGroup = '';
+const assignedGroup = () => (users().find(u => u.sn === session.sn) || {}).group || '';
 
 /* ---------- Student ---------- */
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc);
@@ -232,7 +233,7 @@ function studentView() {
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
-      ${(settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
+      ${assignedGroup() ? `<p>Your group: <b>${esc(assignedGroup())}</b></p>` : (settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
       <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? 'Sign for PC ' + pick : 'Choose a PC first'}</button>`;
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
@@ -245,7 +246,8 @@ async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
   if (records().some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
-  if (!myGroup) return say('Please choose your group.');
+  const grp = assignedGroup() || myGroup;
+  if (!grp) return say('Please choose your group.');
   const lab = settings().lab;
   if (!lab) return say('The admin has not set the lab location yet. Please tell the admin.');
   if (busy) return;
@@ -255,7 +257,7 @@ async function sign() {
     if (d > lab.radius) { busy = false; return say(`You are about ${Math.round(d)} m from the lab. You must be within ${lab.radius} m to sign.`); }
   } catch (e) { busy = false; return say(geoMsg(e)); }
   busy = false;
-  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: myGroup, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: grp, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
   const ref = fs.collection('records').doc(rec.id);
   try {
     await fs.runTransaction(async tx => { if ((await tx.get(ref)).exists) throw new Error('taken'); tx.set(ref, rec); });
@@ -275,6 +277,9 @@ function inRange() {
 }
 function adminView() {
   const list = inRange(), st = settings();
+  const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
+  const personal = records().filter(r => r.pc === 'Personal' && r.date >= ymd(wk) && r.date <= ymd(fri))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
   <div class="card"><h2>Settings</h2>
@@ -287,7 +292,7 @@ function adminView() {
     <button onclick="setLab()">Use this device's location as the lab</button>
     ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>
   <div class="card"><h2>Groups</h2>
-    ${(st.groups || []).length ? `<div class="wrap"><table>${st.groups.map((g, i) => `<tr><td>${esc(g)}</td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add at least one.</p>'}
+    ${(st.groups || []).length ? `<div class="wrap"><table>${st.groups.map((g, i) => `<tr><td>${esc(g)} (${users().filter(u => u.group === g).length} students)</td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add at least one.</p>'}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
   <div class="card"><h2>Personal PC</h2>
@@ -295,7 +300,10 @@ function adminView() {
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
     <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${(st.groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select></div></div>
-    <button onclick="markPersonal()">Mark as personal PC</button></div>
+    <button onclick="markPersonal()">Mark as personal PC</button>
+    <h2 style="margin-top:20px">Using a personal PC this week</h2>
+    ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th></th></tr>${personal.map(r =>
+      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
   <div class="card"><h2>Admins (up to 2)</h2>
     <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
     ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
@@ -305,9 +313,10 @@ function adminView() {
     <div class="row"><div><label for="np">New password (at least 6 characters)</label><input id="np" type="password"></div>
     <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
     <button onclick="changeAdminPw()">Change admin password</button></div>
-  <div class="card"><h2>Reset a student password</h2>
-    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th></th></tr>${users().map((u, i) =>
-      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
+  <div class="card"><h2>Students</h2>
+    <p>Choose a group for each student. Their group is used when they sign.</p>
+    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th>Group</th><th></th></tr>${users().map((u, i) =>
+      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><select style="min-width:130px" aria-label="Group for ${esc(u.name)}" onchange="assignGroup(${i}, this.value)"><option value="">(none)</option>${groupOpts(u.group)}</select></td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
   <div class="card"><h2>Reports</h2>
     <div class="row">
       <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
@@ -350,6 +359,15 @@ function saveRadius() {
   if (!radius || radius < 20) return say('Distance must be at least 20 metres.');
   saveSettings({ ...settings(), lab: { ...settings().lab, radius } }).then(() => say('Distance saved.', true), () => say('Could not save.'));
 }
+const groupOpts = cur => {
+  const g = settings().groups || [], all = cur && !g.includes(cur) ? [...g, cur] : g;
+  return all.map(x => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
+};
+function assignGroup(i, group) {
+  if (!isAdmin()) return;
+  const u = users()[i];
+  fs.collection('users').doc(u.sn).update({ group }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
+}
 function addGroup() {
   if (!isAdmin()) return;
   const g = $('gn').value.trim(), gr = settings().groups || [];
@@ -360,12 +378,12 @@ function addGroup() {
 function removeGroup(i) {
   if (!isAdmin()) return;
   const gr = [...(settings().groups || [])];
-  if (!confirm(`Remove group ${gr[i]}? Old sign-ins keep this name.`)) return;
+  if (!confirm(`Remove group ${gr[i]}? Students and old sign-ins keep this name.`)) return;
   gr.splice(i, 1); saveSettings({ ...settings(), groups: gr }).then(() => render());
 }
 async function markPersonal() {
   if (!isAdmin()) return;
-  const sn = $('pp').value, date = $('pd').value, group = $('pg').value, u = users().find(x => x.sn === sn);
+  const sn = $('pp').value, date = $('pd').value, u = users().find(x => x.sn === sn), group = $('pg').value || (u && u.group) || '';
   if (!u) return say('Choose a student.');
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
   if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has a sign-in on that day. Remove it first.');
