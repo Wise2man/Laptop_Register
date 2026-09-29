@@ -20,7 +20,7 @@ main{max-width:900px;margin:20px auto;padding:0 14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:16px}
 h2{margin:0 0 10px;font-size:18px}
 label{display:block;margin:10px 0 4px;font-size:14px;color:var(--mute)}
-input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
 button{padding:10px 16px;border:0;border-radius:6px;background:var(--acc);color:#fff;font:inherit;cursor:pointer;margin:12px 6px 0 0}
 button.alt{background:transparent;color:var(--acc);border:1px solid var(--acc)}
 button.sm{padding:4px 10px;margin:0 4px 0 0;font-size:13px}
@@ -36,11 +36,18 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid 
 table{border-collapse:collapse;width:100%;font-size:14px}
 th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;white-space:nowrap}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:160px}
+nav{background:var(--card);border-bottom:1px solid var(--line);padding:0 14px;display:flex;flex-wrap:wrap}
+nav a{padding:10px 14px;color:var(--ink);text-decoration:none;border-bottom:3px solid transparent}
+nav a.on{border-bottom-color:var(--acc);font-weight:bold}
+nav a:focus-visible{outline:3px solid var(--acc)}
+.rep{border:1px solid var(--line);border-left:5px solid var(--mute);border-radius:6px;padding:10px;margin:10px 0;font-size:14px}
+.rep.approved{border-left-color:var(--ok)}.rep.rejected{border-left-color:var(--bad)}
 code{background:var(--bg);padding:2px 5px;border-radius:4px}
 </style>
 </head>
 <body>
 <header><h1>PC Register</h1><div id="who"></div></header>
+<nav id="nav"></nav>
 <main id="app"><div class="card">Loading...</div></main>
 <script>
 /* ============ Firebase config ============ */
@@ -71,8 +78,11 @@ async function hash(s) {
 
 /* ---------- Shared online data (Firebase Firestore) ---------- */
 let fs = null;
-const C = { settings: { totalPCs: 41, admins: [] }, users: [], records: [] };
-const loaded = { s: 0, u: 0, r: 0 };
+const C = { settings: { totalPCs: 41, admins: [], groups: [] }, users: [], records: [], reports: [] };
+const WEEK = 7 * 864e5;
+const liveReports = () => C.reports.filter(x => Date.now() - x.created <= WEEK);
+const loaded = { s: 0, u: 0, r: 0, p: 0 };
+const ready = () => loaded.s && loaded.u && loaded.r && loaded.p;
 const settings = () => C.settings, users = () => C.users, records = () => C.records;
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
 const saveSettings = st => fs.doc('settings/main').set(st);
@@ -95,27 +105,39 @@ function start() {
   if (typeof firebase === 'undefined') return fail('Firebase could not load. Check your internet.');
   firebase.initializeApp(firebaseConfig); fs = firebase.firestore();
   fs.doc('settings/main').onSnapshot(d => {
-    if (d.exists) { C.settings = d.data(); C.settings.admins = C.settings.admins || []; }
+    if (d.exists) { C.settings = d.data(); C.settings.admins = C.settings.admins || []; C.settings.groups = C.settings.groups || []; }
     loaded.s = 1; refresh();
   }, fail);
   fs.collection('users').onSnapshot(q => { C.users = q.docs.map(d => d.data()); loaded.u = 1; refresh(); }, fail);
   fs.collection('records').onSnapshot(q => { C.records = q.docs.map(d => d.data()); loaded.r = 1; refresh(); }, fail);
+  fs.collection('reports').onSnapshot(q => {
+    C.reports = q.docs.map(d => d.data());
+    C.reports.filter(x => Date.now() - x.created > WEEK).forEach(x => fs.collection('reports').doc(x.id).delete().catch(() => {}));
+    loaded.p = 1; refresh();
+  }, fail);
 }
 function refresh() {
-  if (!(loaded.s && loaded.u && loaded.r)) return;
+  if (!ready()) return;
   const a = document.activeElement;
-  if (a && /^(INPUT|SELECT)$/.test(a.tagName)) return; // do not wipe what someone is typing
+  if (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // do not wipe what someone is typing
   render();
 }
 
 /* ---------- Views ---------- */
 function render() {
-  if (!(loaded.s && loaded.u && loaded.r)) return;
+  if (!ready()) return;
   $('who').innerHTML = session
     ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
+  $('nav').innerHTML = '';
   if (!session) return authView();
-  session.role === 'admin' ? adminView() : studentView();
+  const adm = session.role === 'admin', n = liveReports().filter(r => r.status === 'pending').length;
+  $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${adm ? 'Admin' : 'Register'}</a>` +
+    `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${adm ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>`;
+  if (page() === 'reports') return adm ? adminReports() : studentReports();
+  adm ? adminView() : studentView();
 }
+const page = () => location.hash === '#reports' ? 'reports' : 'register';
+window.addEventListener('hashchange', () => { msg = ''; render(); });
 function authView() {
   const needAdmin = !settings().admins.length;
   if (!needAdmin && tab === 'admin') tab = 'login';
@@ -181,6 +203,21 @@ async function setupAdmin() {
 }
 function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; render(); }
 
+/* ---------- Location ---------- */
+function distance(a, b, c, d) {
+  const R = 6371000, r = x => x * Math.PI / 180, dLa = r(c - a), dLo = r(d - b);
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+const getPos = () => new Promise((ok, no) => {
+  if (!navigator.geolocation) return no({ code: 0 });
+  navigator.geolocation.getCurrentPosition(ok, no, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+});
+const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this page in your browser settings, then try again.'
+  : e.code === 3 ? 'Finding your location took too long. Go near a window, switch on GPS, and try again.'
+  : 'Could not find your location. Switch on location and try again.';
+let busy = false, myGroup = '';
+
 /* ---------- Student ---------- */
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc);
 function studentView() {
@@ -188,13 +225,14 @@ function studentView() {
   const mine = records().find(r => r.date === today && r.sn === session.sn);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
-  else if (mine) top = `<p>Today you are holding</p><div class="big">PC ${mine.pc}</div>
-      <p>Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.</p>`;
+  else if (mine) top = `<p>Today you are holding</p><div class="big">${mine.pc === 'Personal' ? 'Personal PC' : 'PC ' + mine.pc}</div>
+      <p>${mine.pc === 'Personal' ? 'The admin recorded that you are using your own PC today.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.group ? ' Group: ' + esc(mine.group) + '.' : ''}</p>`;
   else {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
-    top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it.</p>
+    top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
+      ${(settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
       <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? 'Sign for PC ' + pick : 'Choose a PC first'}</button>`;
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
@@ -207,7 +245,17 @@ async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
   if (records().some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
-  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  if (!myGroup) return say('Please choose your group.');
+  const lab = settings().lab;
+  if (!lab) return say('The admin has not set the lab location yet. Please tell the admin.');
+  if (busy) return;
+  busy = true;
+  try {
+    const pos = await getPos(), d = distance(pos.coords.latitude, pos.coords.longitude, lab.lat, lab.lng);
+    if (d > lab.radius) { busy = false; return say(`You are about ${Math.round(d)} m from the lab. You must be within ${lab.radius} m to sign.`); }
+  } catch (e) { busy = false; return say(geoMsg(e)); }
+  busy = false;
+  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: myGroup, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
   const ref = fs.collection('records').doc(rec.id);
   try {
     await fs.runTransaction(async tx => { if ((await tx.get(ref)).exists) throw new Error('taken'); tx.set(ref, rec); });
@@ -223,7 +271,7 @@ function inRange() {
     const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4);
     list = list.filter(r => r.date >= ymd(m) && r.date <= ymd(f));
   } else list = list.filter(r => r.date.startsWith(range.value.slice(0, 7)));
-  return [...list].sort((a, b) => a.date.localeCompare(b.date) || a.pc - b.pc);
+  return [...list].sort((a, b) => a.date.localeCompare(b.date) || String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
 }
 function adminView() {
   const list = inRange(), st = settings();
@@ -232,6 +280,22 @@ function adminView() {
   <div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
+  <div class="card"><h2>Lab location</h2>
+    <p>${st.lab ? `Saved: ${st.lab.lat.toFixed(5)}, ${st.lab.lng.toFixed(5)}. Students must be within ${st.lab.radius} m.` : '<span class="err">Not set yet. Students cannot sign until you set it.</span>'}</p>
+    <p>Stand in the lab with this device and click the button. A phone with GPS is more exact than a desktop PC.</p>
+    <div class="row"><div><label for="rad">Allowed distance in metres</label><input id="rad" type="number" min="20" value="${st.lab ? st.lab.radius : 100}"></div></div>
+    <button onclick="setLab()">Use this device's location as the lab</button>
+    ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>
+  <div class="card"><h2>Groups</h2>
+    ${(st.groups || []).length ? `<div class="wrap"><table>${st.groups.map((g, i) => `<tr><td>${esc(g)}</td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add at least one.</p>'}
+    <label for="gn">New group name</label><input id="gn">
+    <button onclick="addGroup()">Add group</button></div>
+  <div class="card"><h2>Personal PC</h2>
+    <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
+    <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
+    <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
+    <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${(st.groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select></div></div>
+    <button onclick="markPersonal()">Mark as personal PC</button></div>
   <div class="card"><h2>Admins (up to 2)</h2>
     <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
     ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
@@ -265,10 +329,49 @@ function setRange() {
 const isAdmin = () => session && session.role === 'admin';
 function saveTotal() {
   if (!isAdmin()) return;
-  const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().map(r => r.pc));
+  const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().map(r => +r.pc || 0));
   if (!n || n < 1) return say('Enter a valid number.');
   if (n < maxUsed) return say(`PC ${maxUsed} is already in the records. Number cannot be lower.`);
   saveSettings({ ...settings(), totalPCs: n }).then(() => say('Saved.', true), () => say('Could not save.'));
+}
+async function setLab() {
+  if (!isAdmin()) return;
+  const radius = parseInt($('rad').value, 10);
+  if (!radius || radius < 20) return say('Distance must be at least 20 metres.');
+  try {
+    const pos = await getPos();
+    await saveSettings({ ...settings(), lab: { lat: pos.coords.latitude, lng: pos.coords.longitude, radius } });
+    say(`Lab location saved (this device is accurate to about ${Math.round(pos.coords.accuracy)} m).`, true);
+  } catch (e) { say(e.code ? geoMsg(e) : 'Could not save.'); }
+}
+function saveRadius() {
+  if (!isAdmin() || !settings().lab) return;
+  const radius = parseInt($('rad').value, 10);
+  if (!radius || radius < 20) return say('Distance must be at least 20 metres.');
+  saveSettings({ ...settings(), lab: { ...settings().lab, radius } }).then(() => say('Distance saved.', true), () => say('Could not save.'));
+}
+function addGroup() {
+  if (!isAdmin()) return;
+  const g = $('gn').value.trim(), gr = settings().groups || [];
+  if (!g) return say('Type a group name.');
+  if (gr.some(x => x.toLowerCase() === g.toLowerCase())) return say('That group already exists.');
+  saveSettings({ ...settings(), groups: [...gr, g] }).then(() => say('Group added.', true), () => say('Could not save.'));
+}
+function removeGroup(i) {
+  if (!isAdmin()) return;
+  const gr = [...(settings().groups || [])];
+  if (!confirm(`Remove group ${gr[i]}? Old sign-ins keep this name.`)) return;
+  gr.splice(i, 1); saveSettings({ ...settings(), groups: gr }).then(() => render());
+}
+async function markPersonal() {
+  if (!isAdmin()) return;
+  const sn = $('pp').value, date = $('pd').value, group = $('pg').value, u = users().find(x => x.sn === sn);
+  if (!u) return say('Choose a student.');
+  if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
+  if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has a sign-in on that day. Remove it first.');
+  const t = new Date(), rec = { id: `${date}_personal_${sn}`, date, sn, name: u.name, group, pc: 'Personal', time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  await fs.collection('records').doc(rec.id).set(rec);
+  say(`${esc(u.name)} is marked as using a personal PC on ${date}.`, true);
 }
 async function addAdmin() {
   if (!isAdmin()) return;
@@ -298,9 +401,9 @@ async function resetStudent(i) {
 }
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
-  return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${r.pc}</td><td>${r.time}</td>` +
-      (admin ? `<td><button class="sm" onclick="editPc('${r.id}')">Change PC</button><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+  return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${r.pc}</td><td>${r.time}</td>` +
+      (admin ? `<td>${r.pc === 'Personal' ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function editPc(id) {
   if (!isAdmin()) return;
@@ -321,16 +424,86 @@ async function removeRec(id) {
   await fs.collection('records').doc(id).delete(); render();
 }
 
+/* ---------- Absence reports ---------- */
+const STATUS = { pending: 'Waiting for the admin', approved: 'Approved', rejected: 'Rejected' };
+function reportCard(r, admin) {
+  const left = Math.max(1, Math.ceil((r.created + WEEK - Date.now()) / 864e5));
+  return `<div class="rep ${r.status}"><b>${esc(r.name)}</b> (${esc(r.sn)}): ${esc(r.type)} on ${r.date} (${dayName(r.date)})<br>${esc(r.reason)}<br>
+    <small>Sent ${new Date(r.created).toLocaleString()}. Disappears in ${left} day(s).</small><br>
+    <b>${STATUS[r.status]}</b>${r.note ? `. Admin note: ${esc(r.note)}` : ''}
+    ${admin ? `<br><button class="sm" onclick="decide('${r.id}','approved')">Approve</button><button class="sm alt" onclick="decide('${r.id}','rejected')">Reject</button><button class="sm alt" onclick="delReport('${r.id}')">Delete</button>` : ''}</div>`;
+}
+function studentReports() {
+  const mine = liveReports().filter(r => r.sn === session.sn).sort((a, b) => b.created - a.created);
+  $('app').innerHTML = `
+  <div class="card"><h2>Report absence</h2>
+    <p>Tell the admin if you will be absent, late, or leaving early. Your report disappears after 7 days. You can send at most 2 reports a week (Monday to Sunday) and 3 a month.</p>
+    <p id="quota"></p>
+    <div class="row"><div><label for="rk">Type</label><select id="rk"><option>Absent</option><option>Late</option><option>Leaving early</option><option>Other</option></select></div>
+    <div><label for="rd">Date</label><input id="rd" type="date" value="${ymd(new Date())}"></div></div>
+    <label for="rr">Reason</label><textarea id="rr" rows="4" maxlength="500"></textarea>
+    <button onclick="sendReport()">Send report</button><div class="msg err">${msg}</div></div>
+  <div class="card"><h2>My reports</h2>${mine.length ? mine.map(r => reportCard(r, false)).join('') : '<p>You have no reports.</p>'}</div>`;
+  showQuota();
+}
+async function sendReport() {
+  const type = $('rk').value, date = $('rd').value, reason = $('rr').value.trim();
+  if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
+  if (reason.length < 5) return say('Please write a reason (at least 5 characters).');
+  const now = Date.now(), id = `${session.sn}_${now}`;
+  const logRef = fs.collection('reportlog').doc(session.sn), repRef = fs.collection('reports').doc(id);
+  try {
+    await fs.runTransaction(async tx => {
+      const d = await tx.get(logRef), times = d.exists ? d.data().times : [], u = usage(times, now);
+      if (u.w >= LIMIT_WEEK) throw new Error('week');
+      if (u.m >= LIMIT_MONTH) throw new Error('month');
+      tx.set(logRef, { sn: session.sn, times: [...times.filter(x => x > now - 40 * 864e5), now] });
+      tx.set(repRef, { id, sn: session.sn, name: session.name, type, date, reason, created: now, status: 'pending', note: '' });
+    });
+    say('Report sent. The admin will approve or reject it.', true);
+  } catch (e) {
+    say(e.message === 'week' ? `You already sent ${LIMIT_WEEK} reports this week. You can send again from next Monday.`
+      : e.message === 'month' ? `You already sent ${LIMIT_MONTH} reports this month. You can send again next month.`
+      : 'Could not send. Check your internet.');
+  }
+}
+const LIMIT_WEEK = 2, LIMIT_MONTH = 3;
+const weekStart = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); };
+const monthStart = t => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); };
+const usage = (times, now) => ({ w: times.filter(x => x >= weekStart(now)).length, m: times.filter(x => x >= monthStart(now)).length });
+async function showQuota() {
+  try {
+    const d = await fs.collection('reportlog').doc(session.sn).get(), u = usage(d.exists ? d.data().times : [], Date.now()), el = $('quota');
+    if (el) el.textContent = `Reports sent this week: ${u.w} of ${LIMIT_WEEK}. This month: ${u.m} of ${LIMIT_MONTH}.`;
+  } catch (e) {}
+}
+function adminReports() {
+  const list = [...liveReports()].sort((a, b) => b.created - a.created);
+  $('app').innerHTML = `<div class="msg err">${msg}</div><div class="card"><h2>Absence reports</h2>
+    <p>Reports disappear by themselves 7 days after they are sent. Approve or reject each one based on the reason.</p>
+    ${list.length ? list.map(r => reportCard(r, true)).join('') : '<p>No reports.</p>'}</div>`;
+}
+async function decide(id, status) {
+  if (!isAdmin()) return;
+  const note = prompt(status === 'approved' ? 'Note for the student (optional):' : 'Why is it rejected? (optional note for the student):', '');
+  if (note === null) return;
+  await fs.collection('reports').doc(id).update({ status, note: note.trim(), decidedBy: session.user });
+}
+async function delReport(id) {
+  if (!isAdmin() || !confirm('Delete this report?')) return;
+  await fs.collection('reports').doc(id).delete();
+}
+
 /* ---------- Downloads ---------- */
 function reportName() {
   if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `PC-register-week-${ymd(m)}-to-${ymd(f)}`; }
   return `PC-register-month-${range.value.slice(0, 7)}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.pc, r.time]);
-const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'PC', 'Time'];
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.group || '', r.pc, r.time]);
+const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group', 'PC', 'Time'];
 function exportXlsx() {
   const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
-  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:6},{wch:8}];
+  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:16},{wch:9},{wch:8}];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Register');
   XLSX.writeFile(wb, reportName() + '.xlsx');
 }
