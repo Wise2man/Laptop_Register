@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PC Register</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#1c2733;--mute:#66768a;--line:#d5dce4;--acc:#0b5c8a;--ok:#2e7d4f;--bad:#b3372d}
+@media(prefers-color-scheme:dark){:root{--bg:#141a21;--card:#1d252e;--ink:#e6ebf0;--mute:#93a1b2;--line:#33404d;--acc:#5db3e6;--ok:#6cc48d;--bad:#ef8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Verdana,Geneva,sans-serif;padding:env(safe-area-inset-top,0) 0 0}
+header{background:var(--acc);color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+header h1{margin:0;font-size:20px}
+main{max-width:900px;margin:20px auto;padding:0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:16px}
+h2{margin:0 0 10px;font-size:18px}
+label{display:block;margin:10px 0 4px;font-size:14px;color:var(--mute)}
+input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+button{padding:10px 16px;border:0;border-radius:6px;background:var(--acc);color:#fff;font:inherit;cursor:pointer;margin:12px 6px 0 0}
+button.alt{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+button.sm{padding:4px 10px;margin:0 4px 0 0;font-size:13px}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.tabs button{margin:0 6px 12px 0}
+.msg{margin-top:12px;font-size:14px}.err{color:var(--bad)}.good{color:var(--ok)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:8px;margin-top:10px}
+.pc{margin:0;padding:12px 0;background:var(--bg);color:var(--ink);border:1px solid var(--line)}
+.pc.sel{background:var(--acc);color:#fff}
+.pc:disabled{opacity:.4;text-decoration:line-through;cursor:not-allowed}
+.big{font-size:32px;font-weight:bold;color:var(--acc)}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;white-space:nowrap}
+.row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:160px}
+</style>
+</head>
+<body>
+<header><h1>PC Register</h1><div id="who"></div></header>
+<main id="app"></main>
+<script>
+/* ---------- Storage (saved in this browser) ---------- */
+const K = 'pcreg_';
+const db = {
+  get(k, d) { try { const v = JSON.parse(localStorage.getItem(K + k)); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { localStorage.setItem(K + k, JSON.stringify(v)); }
+};
+async function hash(s) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $ = id => document.getElementById(id);
+const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+/* ---------- Dates ---------- */
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const dayName = s => DAYS[parse(s).getDay()];
+const isWeekday = d => d.getDay() >= 1 && d.getDay() <= 5;
+function mondayOf(s) { const d = parse(s), diff = (d.getDay() + 6) % 7; d.setDate(d.getDate() - diff); return d; }
+
+/* ---------- Data ---------- */
+const settings = () => {
+  const s = db.get('settings', { totalPCs: 41, admins: [] });
+  if (!s.admins) { s.admins = s.admin ? [{ user: 'admin', name: 'Admin', pw: s.admin }] : []; delete s.admin; }
+  return s;
+};
+const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
+const users = () => db.get('users', []);
+const records = () => db.get('records', []);
+let session = db.get('session', null);
+if (session && session.role === 'admin' && !session.user) session.user = 'admin';
+let msg = '', tab = 'login', pick = null;
+
+function pcTaken(date, pc) { return records().find(r => r.date === date && r.pc === pc); }
+
+/* ---------- Views ---------- */
+function render() {
+  $('who').innerHTML = session
+    ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
+  if (!session) return authView();
+  session.role === 'admin' ? adminView() : studentView();
+}
+
+function authView() {
+  const needAdmin = !settings().admins.length;
+  if (!needAdmin && tab === 'admin') tab = 'login';
+  $('app').innerHTML = `
+  <div class="card">
+    <div class="tabs">
+      <button class="${tab === 'login' ? '' : 'alt'}" onclick="setTab('login')">Student log in</button>
+      <button class="${tab === 'signup' ? '' : 'alt'}" onclick="setTab('signup')">Student sign up</button>
+      ${needAdmin ? `<button class="${tab === 'admin' ? '' : 'alt'}" onclick="setTab('admin')">Set up admin</button>` : ''}
+    </div>
+    ${tab === 'signup' ? `
+      <label for="n">Full name</label><input id="n" autocomplete="name">
+      <label for="s">Student number</label><input id="s">
+      <label for="p">Password (at least 6 characters)</label><input id="p" type="password">
+      <button onclick="signup()">Create account</button>` :
+    tab === 'login' ? `
+      <label for="s">Student number or admin username</label><input id="s">
+      <label for="p">Password</label><input id="p" type="password">
+      <button onclick="login()">Log in</button>` : `
+      <p>First time here. Create the first admin account.</p>
+      <label for="s">Admin username</label><input id="s" value="admin">
+      <label for="p">Admin password (at least 6 characters)</label><input id="p" type="password">
+      <button onclick="adminLogin()">Create admin and log in</button>`}
+    <div class="msg err">${msg}</div>
+  </div>`;
+}
+const setTab = t => { tab = t; msg = ''; render(); };
+const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render(); };
+
+async function signup() {
+  const name = $('n').value.trim(), sn = $('s').value.trim().toUpperCase(), p = $('p').value;
+  if (!name || !sn) return say('Please fill in your name and student number.');
+  if (findAdmin(sn)) return say('This student number is not allowed.');
+  if (p.length < 6) return say('Password must have at least 6 characters.');
+  const u = users();
+  if (u.some(x => x.sn === sn)) return say('This student number already has an account. Please log in.');
+  u.push({ name, sn, pw: await hash(p) }); db.set('users', u);
+  tab = 'login'; say('Account created. You can log in now.', true);
+}
+async function login() {
+  const sn = $('s').value.trim().toUpperCase(), h = await hash($('p').value);
+  const ad = findAdmin(sn);
+  if (ad) {
+    if (ad.pw !== h) return say('Wrong admin password.');
+    session = { role: 'admin', name: ad.name || ad.user, user: ad.user }; db.set('session', session); msg = ''; return render();
+  }
+  const u = users().find(x => x.sn === sn && x.pw === h);
+  if (!u) return say('Wrong username/student number or password.');
+  session = { role: 'student', sn, name: u.name }; db.set('session', session); msg = ''; render();
+}
+async function adminLogin() {
+  const st = settings();
+  if (st.admins.length) return;
+  const user = $('s').value.trim().toLowerCase(), p = $('p').value;
+  if (!user) return say('Type an admin username.');
+  if (users().some(x => x.sn.toLowerCase() === user)) return say('That name is used by a student. Choose another.');
+  if (p.length < 6) return say('Password must have at least 6 characters.');
+  st.admins.push({ user, name: user, pw: await hash(p) }); db.set('settings', st);
+  session = { role: 'admin', name: user, user }; db.set('session', session); msg = ''; render();
+}
+function logout() { session = null; db.set('session', null); pick = null; render(); }
+
+/* ---------- Student ---------- */
+function studentView() {
+  const today = ymd(new Date()), total = settings().totalPCs;
+  const mine = records().find(r => r.date === today && r.sn === session.sn);
+  const weekday = isWeekday(new Date());
+  let top;
+  if (!weekday) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
+  else if (mine) top = `<p>Today you are holding</p><div class="big">PC ${mine.pc}</div>
+      <p>Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.</p>`;
+  else {
+    let cells = '';
+    for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${pcTaken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
+    top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it.</p>
+      <div class="grid">${cells}</div>
+      <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? 'Sign for PC ' + pick : 'Choose a PC first'}</button>`;
+  }
+  const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+  $('app').innerHTML = `
+  <div class="card"><h2>${dayName(today)}, ${today}</h2>${top}<div class="msg err">${msg}</div></div>
+  <div class="card"><h2>My last sign-ins</h2><div class="wrap">${table(hist, false)}</div></div>`;
+}
+const choose = i => { pick = i; render(); };
+function sign() {
+  const today = ymd(new Date()), r = records();
+  msg = '';
+  if (!isWeekday(new Date())) return say('Register is closed on weekends.');
+  if (r.some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
+  if (pcTaken(today, pick)) { pick = null; return say('Someone just took that PC. Pick another one.'); }
+  const t = new Date();
+  r.push({ date: today, sn: session.sn, name: session.name, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` });
+  db.set('records', r); pick = null; render();
+}
+
+/* ---------- Admin ---------- */
+let range = { type: 'week', value: ymd(new Date()) };
+function inRange() {
+  let list = records();
+  if (range.type === 'week') {
+    const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4);
+    list = list.filter(r => r.date >= ymd(m) && r.date <= ymd(f));
+  } else {
+    const mo = range.value.slice(0, 7); list = list.filter(r => r.date.startsWith(mo));
+  }
+  return list.sort((a, b) => a.date.localeCompare(b.date) || a.pc - b.pc);
+}
+function adminView() {
+  const list = inRange();
+  $('app').innerHTML = `
+  <div class="msg err">${msg}</div>
+  <div class="card"><h2>Settings</h2>
+    <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${settings().totalPCs}"></div></div>
+    <button onclick="saveTotal()">Save number of PCs</button></div>
+  <div class="card"><h2>Admins (up to 2)</h2>
+    <p>${settings().admins.map(a => esc(a.user)).join(' and ')}</p>
+    ${settings().admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au"></div>
+    <div><label for="ap">Password (at least 6 characters)</label><input id="ap" type="password"></div></div>
+    <button onclick="addAdmin()">Add second admin</button>` : '<p>Both admin places are used.</p>'}</div>
+  <div class="card"><h2>Change my admin password</h2>
+    <div class="row"><div><label for="np">New password (at least 6 characters)</label><input id="np" type="password"></div>
+    <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
+    <button onclick="changeAdminPw()">Change admin password</button></div>
+  <div class="card"><h2>Reset a student password</h2>
+    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th></th></tr>${users().map((u, i) =>
+      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
+  <div class="card"><h2>Reports</h2>
+    <div class="row">
+      <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
+        <option value="week" ${range.type === 'week' ? 'selected' : ''}>Week (Mon to Fri)</option>
+        <option value="month" ${range.type === 'month' ? 'selected' : ''}>Month</option></select></div>
+      <div><label for="rv">${range.type === 'week' ? 'Any day in the week' : 'Month'}</label>
+        <input id="rv" type="${range.type === 'week' ? 'date' : 'month'}" value="${range.type === 'week' ? range.value : range.value.slice(0, 7)}" onchange="setRange()"></div>
+    </div>
+    <button onclick="exportXlsx()">Download Excel</button><button onclick="exportPdf()">Download PDF</button>
+    <p>${list.length} sign-in(s) in this ${range.type}.</p>
+    <div class="wrap">${table(list, true)}</div></div>`;
+}
+function setRange() {
+  range.type = $('rt').value;
+  const v = $('rv') ? $('rv').value : '';
+  range.value = v ? (range.type === 'month' && v.length === 7 ? v + '-01' : (v.length === 7 ? v + '-01' : v)) : ymd(new Date());
+  render();
+}
+async function resetStudent(i) {
+  if (!session || session.role !== 'admin') return;
+  const u = users(), x = u[i];
+  const v = prompt(`Type a new password for ${x.name} (${x.sn}), at least 6 characters. Then give it to the student:`);
+  if (v === null) return;
+  if (v.length < 6) return say('Password must have at least 6 characters.');
+  x.pw = await hash(v); db.set('users', u); say(`Password reset for ${esc(x.name)}.`, true);
+}
+async function addAdmin() {
+  if (!session || session.role !== 'admin') return;
+  const st = settings(), user = $('au').value.trim().toLowerCase(), p = $('ap').value;
+  if (st.admins.length >= 2) return say('There are already 2 admins.');
+  if (!user) return say('Type a username for the second admin.');
+  if (findAdmin(user) || users().some(x => x.sn.toLowerCase() === user)) return say('That username is already used.');
+  if (p.length < 6) return say('Password must have at least 6 characters.');
+  st.admins.push({ user, name: user, pw: await hash(p) }); db.set('settings', st); say('Second admin added.', true);
+}
+async function changeAdminPw() {
+  if (!session || session.role !== 'admin') return;
+  const a = $('np').value, b = $('np2').value;
+  if (a.length < 6) return say('Password must have at least 6 characters.');
+  if (a !== b) return say('The two passwords do not match.');
+  const st = settings(); st.admins.find(x => x.user === session.user).pw = await hash(a); db.set('settings', st); say('Admin password changed.', true);
+}
+function saveTotal() {
+  const n = parseInt($('tp').value, 10), s = settings();
+  const maxUsed = Math.max(0, ...records().map(r => r.pc));
+  if (!n || n < 1) return say('Enter a valid number.');
+  if (n < maxUsed) return say(`PC ${maxUsed} is already in the records. Number cannot be lower.`);
+  s.totalPCs = n; db.set('settings', s); say('Saved.', true);
+}
+function table(list, admin) {
+  if (!list.length) return '<p>No sign-ins yet.</p>';
+  return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${r.pc}</td><td>${r.time}</td>` +
+      (admin ? `<td><button class="sm" onclick="editPc('${r.date}','${esc(r.sn)}')">Change PC</button><button class="sm alt" onclick="removeRec('${r.date}','${esc(r.sn)}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+}
+function editPc(date, sn) {
+  const r = records(), rec = r.find(x => x.date === date && x.sn === sn);
+  const v = prompt(`New PC number for ${rec.name} (1 to ${settings().totalPCs}):`, rec.pc);
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (!n || n < 1 || n > settings().totalPCs) return say('That PC number does not exist.');
+  const t = pcTaken(date, n);
+  if (t && t !== rec && !(t.sn === sn)) return say(`PC ${n} is already taken by ${t.name} on that day.`);
+  rec.pc = n; db.set('records', r); say('PC number changed.', true);
+}
+function removeRec(date, sn) {
+  if (!confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
+  db.set('records', records().filter(x => !(x.date === date && x.sn === sn))); render();
+}
+
+/* ---------- Downloads ---------- */
+function reportName() {
+  if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `PC-register-week-${ymd(m)}-to-${ymd(f)}`; }
+  return `PC-register-month-${range.value.slice(0, 7)}`;
+}
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.pc, r.time]);
+const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'PC', 'Time'];
+function exportXlsx() {
+  const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
+  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:6},{wch:8}];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Register');
+  XLSX.writeFile(wb, reportName() + '.xlsx');
+}
+function exportPdf() {
+  const doc = new jspdf.jsPDF();
+  doc.setFontSize(14); doc.text('PC Register: ' + reportName().replace('PC-register-', ''), 14, 16);
+  doc.autoTable({ head: [HEAD], body: rows(), startY: 22, styles: { fontSize: 9 } });
+  doc.save(reportName() + '.pdf');
+}
+
+render();
+</script>
+</body>
+</html>
