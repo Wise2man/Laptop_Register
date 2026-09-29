@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PC Register</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
@@ -11,7 +13,7 @@
 :root{--bg:#eef1f4;--card:#fff;--ink:#1c2733;--mute:#66768a;--line:#d5dce4;--acc:#0b5c8a;--ok:#2e7d4f;--bad:#b3372d}
 @media(prefers-color-scheme:dark){:root{--bg:#141a21;--card:#1d252e;--ink:#e6ebf0;--mute:#93a1b2;--line:#33404d;--acc:#5db3e6;--ok:#6cc48d;--bad:#ef8a80}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Verdana,Geneva,sans-serif;padding:env(safe-area-inset-top,0) 0 0}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Verdana,Geneva,sans-serif}
 header{background:var(--acc);color:#fff;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
 header h1{margin:0;font-size:20px}
 main{max-width:900px;margin:20px auto;padding:0 14px}
@@ -24,7 +26,7 @@ button.alt{background:transparent;color:var(--acc);border:1px solid var(--acc)}
 button.sm{padding:4px 10px;margin:0 4px 0 0;font-size:13px}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 .tabs button{margin:0 6px 12px 0}
-.msg{margin-top:12px;font-size:14px}.err{color:var(--bad)}.good{color:var(--ok)}
+.msg{margin:8px 0;font-size:14px}.err{color:var(--bad)}.good{color:var(--ok)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:8px;margin-top:10px}
 .pc{margin:0;padding:12px 0;background:var(--bg);color:var(--ink);border:1px solid var(--line)}
 .pc.sel{background:var(--acc);color:#fff}
@@ -34,64 +36,93 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid 
 table{border-collapse:collapse;width:100%;font-size:14px}
 th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;white-space:nowrap}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:160px}
+code{background:var(--bg);padding:2px 5px;border-radius:4px}
 </style>
 </head>
 <body>
 <header><h1>PC Register</h1><div id="who"></div></header>
-<main id="app"></main>
+<main id="app"><div class="card">Loading...</div></main>
 <script>
-/* ---------- Storage (saved in this browser) ---------- */
-const K = 'pcreg_';
-const db = {
-  get(k, d) { try { const v = JSON.parse(localStorage.getItem(K + k)); return v === null ? d : v; } catch { return d; } },
-  set(k, v) { localStorage.setItem(K + k, JSON.stringify(v)); }
+/* ============ Firebase config ============ */
+const firebaseConfig = {
+  apiKey: "AIzaSyAYRo3_6E3ppV5pR87CUHekYeYixLDstGA",
+  authDomain: "pc-register-88273.firebaseapp.com",
+  projectId: "pc-register-88273",
+  storageBucket: "pc-register-88273.firebasestorage.app",
+  messagingSenderId: "244112160898",
+  appId: "1:244112160898:web:4140402ef77329f85f5c9b"
 };
-async function hash(s) {
-  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
-}
+/* ================================================================= */
+
+const configured = firebaseConfig.projectId !== 'PASTE_HERE' && firebaseConfig.apiKey !== 'PASTE_HERE';
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $ = id => document.getElementById(id);
 const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-
-/* ---------- Dates ---------- */
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayName = s => DAYS[parse(s).getDay()];
 const isWeekday = d => d.getDay() >= 1 && d.getDay() <= 5;
 function mondayOf(s) { const d = parse(s), diff = (d.getDay() + 6) % 7; d.setDate(d.getDate() - diff); return d; }
+async function hash(s) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
 
-/* ---------- Data ---------- */
-const settings = () => {
-  const s = db.get('settings', { totalPCs: 41, admins: [] });
-  if (!s.admins) { s.admins = s.admin ? [{ user: 'admin', name: 'Admin', pw: s.admin }] : []; delete s.admin; }
-  return s;
-};
+/* ---------- Shared online data (Firebase Firestore) ---------- */
+let fs = null;
+const C = { settings: { totalPCs: 41, admins: [] }, users: [], records: [] };
+const loaded = { s: 0, u: 0, r: 0 };
+const settings = () => C.settings, users = () => C.users, records = () => C.records;
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
-const users = () => db.get('users', []);
-const records = () => db.get('records', []);
-let session = db.get('session', null);
-if (session && session.role === 'admin' && !session.user) session.user = 'admin';
+const saveSettings = st => fs.doc('settings/main').set(st);
+let session = null;
+try { session = JSON.parse(localStorage.getItem('pcreg_session')); } catch {}
+const keepSession = () => localStorage.setItem('pcreg_session', JSON.stringify(session));
 let msg = '', tab = 'login', pick = null;
 
-function pcTaken(date, pc) { return records().find(r => r.date === date && r.pc === pc); }
+function fail(e) {
+  $('app').innerHTML = `<div class="card"><h2>Cannot reach the online database</h2>
+  <p class="err">${esc(e.message || e)}</p>
+  <p>Check your internet. Also check that the Firestore rules were published and the config in index.html is correct.</p></div>`;
+}
+function start() {
+  if (!configured) {
+    $('app').innerHTML = `<div class="card"><h2>One more step</h2>
+    <p>Open <code>index.html</code>, find <code>firebaseConfig</code> at the top of the script, and paste your Firebase details there. Then upload the file to GitHub again.</p></div>`;
+    return;
+  }
+  if (typeof firebase === 'undefined') return fail('Firebase could not load. Check your internet.');
+  firebase.initializeApp(firebaseConfig); fs = firebase.firestore();
+  fs.doc('settings/main').onSnapshot(d => {
+    if (d.exists) { C.settings = d.data(); C.settings.admins = C.settings.admins || []; }
+    loaded.s = 1; refresh();
+  }, fail);
+  fs.collection('users').onSnapshot(q => { C.users = q.docs.map(d => d.data()); loaded.u = 1; refresh(); }, fail);
+  fs.collection('records').onSnapshot(q => { C.records = q.docs.map(d => d.data()); loaded.r = 1; refresh(); }, fail);
+}
+function refresh() {
+  if (!(loaded.s && loaded.u && loaded.r)) return;
+  const a = document.activeElement;
+  if (a && /^(INPUT|SELECT)$/.test(a.tagName)) return; // do not wipe what someone is typing
+  render();
+}
 
 /* ---------- Views ---------- */
 function render() {
+  if (!(loaded.s && loaded.u && loaded.r)) return;
   $('who').innerHTML = session
     ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
   if (!session) return authView();
   session.role === 'admin' ? adminView() : studentView();
 }
-
 function authView() {
   const needAdmin = !settings().admins.length;
   if (!needAdmin && tab === 'admin') tab = 'login';
   $('app').innerHTML = `
   <div class="card">
     <div class="tabs">
-      <button class="${tab === 'login' ? '' : 'alt'}" onclick="setTab('login')">Student log in</button>
+      <button class="${tab === 'login' ? '' : 'alt'}" onclick="setTab('login')">Log in</button>
       <button class="${tab === 'signup' ? '' : 'alt'}" onclick="setTab('signup')">Student sign up</button>
       ${needAdmin ? `<button class="${tab === 'admin' ? '' : 'alt'}" onclick="setTab('admin')">Set up admin</button>` : ''}
     </div>
@@ -101,13 +132,13 @@ function authView() {
       <label for="p">Password (at least 6 characters)</label><input id="p" type="password">
       <button onclick="signup()">Create account</button>` :
     tab === 'login' ? `
-      <label for="s">Student number or admin username</label><input id="s">
+      <label for="s">Student number or admin username</label><input id="s" autocapitalize="off">
       <label for="p">Password</label><input id="p" type="password">
       <button onclick="login()">Log in</button>` : `
       <p>First time here. Create the first admin account.</p>
-      <label for="s">Admin username</label><input id="s" value="admin">
+      <label for="s">Admin username</label><input id="s" value="admin" autocapitalize="off">
       <label for="p">Admin password (at least 6 characters)</label><input id="p" type="password">
-      <button onclick="adminLogin()">Create admin and log in</button>`}
+      <button onclick="setupAdmin()">Create admin and log in</button>`}
     <div class="msg err">${msg}</div>
   </div>`;
 }
@@ -117,48 +148,51 @@ const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render
 async function signup() {
   const name = $('n').value.trim(), sn = $('s').value.trim().toUpperCase(), p = $('p').value;
   if (!name || !sn) return say('Please fill in your name and student number.');
+  if (!/^[A-Z0-9-]{3,30}$/.test(sn)) return say('Student number can only have letters, numbers and dashes.');
   if (findAdmin(sn)) return say('This student number is not allowed.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
-  const u = users();
-  if (u.some(x => x.sn === sn)) return say('This student number already has an account. Please log in.');
-  u.push({ name, sn, pw: await hash(p) }); db.set('users', u);
-  tab = 'login'; say('Account created. You can log in now.', true);
+  try {
+    const ref = fs.collection('users').doc(sn);
+    if ((await ref.get()).exists) return say('This student number already has an account. Please log in.');
+    await ref.set({ name, sn, pw: await hash(sn + ':' + p) });
+    tab = 'login'; say('Account created. You can log in now.', true);
+  } catch (e) { say('Could not save. Check your internet.'); }
 }
 async function login() {
-  const sn = $('s').value.trim().toUpperCase(), h = await hash($('p').value);
-  const ad = findAdmin(sn);
+  const raw = $('s').value.trim(), p = $('p').value, ad = findAdmin(raw);
   if (ad) {
-    if (ad.pw !== h) return say('Wrong admin password.');
-    session = { role: 'admin', name: ad.name || ad.user, user: ad.user }; db.set('session', session); msg = ''; return render();
+    if (ad.pw !== await hash(ad.user + ':' + p)) return say('Wrong admin password.');
+    session = { role: 'admin', name: ad.user, user: ad.user };
+  } else {
+    const sn = raw.toUpperCase(), u = users().find(x => x.sn === sn);
+    if (!u || u.pw !== await hash(sn + ':' + p)) return say('Wrong username or password.');
+    session = { role: 'student', sn, name: u.name };
   }
-  const u = users().find(x => x.sn === sn && x.pw === h);
-  if (!u) return say('Wrong username/student number or password.');
-  session = { role: 'student', sn, name: u.name }; db.set('session', session); msg = ''; render();
+  keepSession(); msg = ''; render();
 }
-async function adminLogin() {
-  const st = settings();
-  if (st.admins.length) return;
+async function setupAdmin() {
+  if (settings().admins.length) return say('An admin already exists. Please log in.');
   const user = $('s').value.trim().toLowerCase(), p = $('p').value;
   if (!user) return say('Type an admin username.');
   if (users().some(x => x.sn.toLowerCase() === user)) return say('That name is used by a student. Choose another.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
-  st.admins.push({ user, name: user, pw: await hash(p) }); db.set('settings', st);
-  session = { role: 'admin', name: user, user }; db.set('session', session); msg = ''; render();
+  await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p) }] });
+  session = { role: 'admin', name: user, user }; keepSession(); msg = ''; render();
 }
-function logout() { session = null; db.set('session', null); pick = null; render(); }
+function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; render(); }
 
 /* ---------- Student ---------- */
+const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs;
   const mine = records().find(r => r.date === today && r.sn === session.sn);
-  const weekday = isWeekday(new Date());
   let top;
-  if (!weekday) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
+  if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
   else if (mine) top = `<p>Today you are holding</p><div class="big">PC ${mine.pc}</div>
       <p>Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.</p>`;
   else {
     let cells = '';
-    for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${pcTaken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
+    for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it.</p>
       <div class="grid">${cells}</div>
       <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? 'Sign for PC ' + pick : 'Choose a PC first'}</button>`;
@@ -169,15 +203,16 @@ function studentView() {
   <div class="card"><h2>My last sign-ins</h2><div class="wrap">${table(hist, false)}</div></div>`;
 }
 const choose = i => { pick = i; render(); };
-function sign() {
-  const today = ymd(new Date()), r = records();
-  msg = '';
+async function sign() {
+  const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
-  if (r.some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
-  if (pcTaken(today, pick)) { pick = null; return say('Someone just took that PC. Pick another one.'); }
-  const t = new Date();
-  r.push({ date: today, sn: session.sn, name: session.name, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` });
-  db.set('records', r); pick = null; render();
+  if (records().some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
+  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const ref = fs.collection('records').doc(rec.id);
+  try {
+    await fs.runTransaction(async tx => { if ((await tx.get(ref)).exists) throw new Error('taken'); tx.set(ref, rec); });
+    pick = null; render();
+  } catch (e) { pick = null; say(e.message === 'taken' ? 'Someone just took that PC. Pick another one.' : 'Could not save. Check your internet and try again.'); }
 }
 
 /* ---------- Admin ---------- */
@@ -187,21 +222,19 @@ function inRange() {
   if (range.type === 'week') {
     const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4);
     list = list.filter(r => r.date >= ymd(m) && r.date <= ymd(f));
-  } else {
-    const mo = range.value.slice(0, 7); list = list.filter(r => r.date.startsWith(mo));
-  }
-  return list.sort((a, b) => a.date.localeCompare(b.date) || a.pc - b.pc);
+  } else list = list.filter(r => r.date.startsWith(range.value.slice(0, 7)));
+  return [...list].sort((a, b) => a.date.localeCompare(b.date) || a.pc - b.pc);
 }
 function adminView() {
-  const list = inRange();
+  const list = inRange(), st = settings();
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
   <div class="card"><h2>Settings</h2>
-    <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${settings().totalPCs}"></div></div>
+    <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
   <div class="card"><h2>Admins (up to 2)</h2>
-    <p>${settings().admins.map(a => esc(a.user)).join(' and ')}</p>
-    ${settings().admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au"></div>
+    <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
+    ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
     <div><label for="ap">Password (at least 6 characters)</label><input id="ap" type="password"></div></div>
     <button onclick="addAdmin()">Add second admin</button>` : '<p>Both admin places are used.</p>'}</div>
   <div class="card"><h2>Change my admin password</h2>
@@ -225,60 +258,67 @@ function adminView() {
 }
 function setRange() {
   range.type = $('rt').value;
-  const v = $('rv') ? $('rv').value : '';
-  range.value = v ? (range.type === 'month' && v.length === 7 ? v + '-01' : (v.length === 7 ? v + '-01' : v)) : ymd(new Date());
+  const v = $('rv').value;
+  range.value = v ? (v.length === 7 ? v + '-01' : v) : ymd(new Date());
   render();
 }
-async function resetStudent(i) {
-  if (!session || session.role !== 'admin') return;
-  const u = users(), x = u[i];
-  const v = prompt(`Type a new password for ${x.name} (${x.sn}), at least 6 characters. Then give it to the student:`);
-  if (v === null) return;
-  if (v.length < 6) return say('Password must have at least 6 characters.');
-  x.pw = await hash(v); db.set('users', u); say(`Password reset for ${esc(x.name)}.`, true);
+const isAdmin = () => session && session.role === 'admin';
+function saveTotal() {
+  if (!isAdmin()) return;
+  const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().map(r => r.pc));
+  if (!n || n < 1) return say('Enter a valid number.');
+  if (n < maxUsed) return say(`PC ${maxUsed} is already in the records. Number cannot be lower.`);
+  saveSettings({ ...settings(), totalPCs: n }).then(() => say('Saved.', true), () => say('Could not save.'));
 }
 async function addAdmin() {
-  if (!session || session.role !== 'admin') return;
+  if (!isAdmin()) return;
   const st = settings(), user = $('au').value.trim().toLowerCase(), p = $('ap').value;
   if (st.admins.length >= 2) return say('There are already 2 admins.');
   if (!user) return say('Type a username for the second admin.');
   if (findAdmin(user) || users().some(x => x.sn.toLowerCase() === user)) return say('That username is already used.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
-  st.admins.push({ user, name: user, pw: await hash(p) }); db.set('settings', st); say('Second admin added.', true);
+  await saveSettings({ ...st, admins: [...st.admins, { user, pw: await hash(user + ':' + p) }] }); say('Second admin added.', true);
 }
 async function changeAdminPw() {
-  if (!session || session.role !== 'admin') return;
-  const a = $('np').value, b = $('np2').value;
+  if (!isAdmin()) return;
+  const a = $('np').value, b = $('np2').value, st = settings();
   if (a.length < 6) return say('Password must have at least 6 characters.');
   if (a !== b) return say('The two passwords do not match.');
-  const st = settings(); st.admins.find(x => x.user === session.user).pw = await hash(a); db.set('settings', st); say('Admin password changed.', true);
+  const admins = st.admins.map(x => x.user === session.user ? { ...x, pw: null } : x);
+  const me = admins.find(x => x.user === session.user); me.pw = await hash(me.user + ':' + a);
+  await saveSettings({ ...st, admins }); say('Admin password changed.', true);
 }
-function saveTotal() {
-  const n = parseInt($('tp').value, 10), s = settings();
-  const maxUsed = Math.max(0, ...records().map(r => r.pc));
-  if (!n || n < 1) return say('Enter a valid number.');
-  if (n < maxUsed) return say(`PC ${maxUsed} is already in the records. Number cannot be lower.`);
-  s.totalPCs = n; db.set('settings', s); say('Saved.', true);
+async function resetStudent(i) {
+  if (!isAdmin()) return;
+  const x = users()[i];
+  const v = prompt(`Type a new password for ${x.name} (${x.sn}), at least 6 characters. Then give it to the student:`);
+  if (v === null) return;
+  if (v.length < 6) return say('Password must have at least 6 characters.');
+  await fs.collection('users').doc(x.sn).update({ pw: await hash(x.sn + ':' + v) }); say(`Password reset for ${esc(x.name)}.`, true);
 }
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
     list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${r.pc}</td><td>${r.time}</td>` +
-      (admin ? `<td><button class="sm" onclick="editPc('${r.date}','${esc(r.sn)}')">Change PC</button><button class="sm alt" onclick="removeRec('${r.date}','${esc(r.sn)}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+      (admin ? `<td><button class="sm" onclick="editPc('${r.id}')">Change PC</button><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
-function editPc(date, sn) {
-  const r = records(), rec = r.find(x => x.date === date && x.sn === sn);
+async function editPc(id) {
+  if (!isAdmin()) return;
+  const rec = records().find(x => x.id === id); if (!rec) return;
   const v = prompt(`New PC number for ${rec.name} (1 to ${settings().totalPCs}):`, rec.pc);
   if (v === null) return;
   const n = parseInt(v, 10);
   if (!n || n < 1 || n > settings().totalPCs) return say('That PC number does not exist.');
-  const t = pcTaken(date, n);
-  if (t && t !== rec && !(t.sn === sn)) return say(`PC ${n} is already taken by ${t.name} on that day.`);
-  rec.pc = n; db.set('records', r); say('PC number changed.', true);
+  if (n === rec.pc) return;
+  const nr = { ...rec, pc: n, id: `${rec.date}_pc${n}` }, oref = fs.collection('records').doc(rec.id), nref = fs.collection('records').doc(nr.id);
+  try {
+    await fs.runTransaction(async tx => { if ((await tx.get(nref)).exists) throw new Error('taken'); tx.delete(oref); tx.set(nref, nr); });
+    say('PC number changed.', true);
+  } catch (e) { say(e.message === 'taken' ? `PC ${n} is already taken on that day.` : 'Could not save.'); }
 }
-function removeRec(date, sn) {
-  if (!confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
-  db.set('records', records().filter(x => !(x.date === date && x.sn === sn))); render();
+async function removeRec(id) {
+  if (!isAdmin() || !confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
+  await fs.collection('records').doc(id).delete(); render();
 }
 
 /* ---------- Downloads ---------- */
@@ -301,7 +341,7 @@ function exportPdf() {
   doc.save(reportName() + '.pdf');
 }
 
-render();
+start();
 </script>
 </body>
 </html>
