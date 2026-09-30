@@ -42,6 +42,7 @@ nav a.on{border-bottom-color:var(--acc);font-weight:bold}
 nav a:focus-visible{outline:3px solid var(--acc)}
 .rep{border:1px solid var(--line);border-left:5px solid var(--mute);border-radius:6px;padding:10px;margin:10px 0;font-size:14px}
 .rep.approved{border-left-color:var(--ok)}.rep.rejected{border-left-color:var(--bad)}
+h3{margin:16px 0 6px;font-size:16px}
 code{background:var(--bg);padding:2px 5px;border-radius:4px}
 </style>
 </head>
@@ -287,6 +288,7 @@ function adminView() {
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
+  ${dayCard()}
   <div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
@@ -338,9 +340,29 @@ function adminView() {
         <input id="rv" type="${range.type === 'week' ? 'date' : 'month'}" value="${range.type === 'week' ? range.value : range.value.slice(0, 7)}" onchange="setRange()"></div>
     </div>
     <button onclick="exportXlsx()">Download Excel</button><button onclick="exportPdf()">Download PDF</button>
-    <p>${list.length} sign-in(s) in this ${range.type}.</p>
-    <div class="wrap">${table(list, true)}</div></div>`;
+    <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p></div>`;
 }
+let dayView = { date: ymd(new Date()), mode: 'group' };
+function dayCard() {
+  const recs = records().filter(r => r.date === dayView.date)
+    .sort((a, b) => String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
+  const pers = recs.filter(isP).length, names = [...(settings().groups || [])];
+  recs.forEach(r => { if (r.group && !names.includes(r.group)) names.push(r.group); });
+  const cnt = g => recs.filter(r => r.group === g).length, nog = recs.filter(r => !r.group);
+  let body;
+  if (dayView.mode === 'all') {
+    body = `<h3>Totals</h3><div class="wrap"><table><tr><th>Group</th><th>Signed in</th></tr>${names.map(g => `<tr><td>${esc(g)}</td><td>${cnt(g)}</td></tr>`).join('')}${nog.length ? `<tr><td>No group</td><td>${nog.length}</td></tr>` : ''}<tr><th>All groups</th><th>${recs.length}</th></tr></table></div><h3>Whole list</h3>${table(recs, true)}`;
+  } else if (!names.length) body = table(recs, true);
+  else body = names.map(g => `<h3>${esc(g)} (${cnt(g)})</h3>${cnt(g) ? table(recs.filter(r => r.group === g), true) : '<p>Nobody yet.</p>'}`).join('') + (nog.length ? `<h3>No group (${nog.length})</h3>${table(nog, true)}` : '');
+  return `<div class="card"><h2>Register for a day</h2>
+    <div class="row"><div><label for="dd">Date</label><input id="dd" type="date" value="${dayView.date}" onchange="setDay()"></div>
+    <div><label for="dm">View</label><select id="dm" onchange="setDay()"><option value="group" ${dayView.mode === 'group' ? 'selected' : ''}>By group</option><option value="all" ${dayView.mode === 'all' ? 'selected' : ''}>Whole list (with totals)</option></select></div></div>
+    <button class="alt" onclick="dayToday()">Go to today</button>
+    <p><b>${dayName(dayView.date)}, ${dayView.date}</b>: ${recs.length} signed in (${recs.length - pers} lab PCs, ${pers} personal PCs).${isWeekday(parse(dayView.date)) ? '' : ' The register is closed on weekends.'}</p>
+    ${body}</div>`;
+}
+function setDay() { dayView.date = $('dd').value || ymd(new Date()); dayView.mode = $('dm').value; render(); }
+function dayToday() { dayView.date = ymd(new Date()); render(); }
 function setRange() {
   range.type = $('rt').value;
   const v = $('rv').value;
