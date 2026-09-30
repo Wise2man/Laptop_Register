@@ -218,6 +218,9 @@ const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this
   : 'Could not find your location. Switch on location and try again.';
 let busy = false, myGroup = '';
 const assignedGroup = () => (users().find(u => u.sn === session.sn) || {}).group || '';
+const personalNums = () => [...(settings().personalPCs || [])].sort((a, b) => a - b);
+const isP = r => r.personal || r.pc === 'Personal';
+const pcLabel = r => r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
 
 /* ---------- Student ---------- */
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc);
@@ -226,15 +229,17 @@ function studentView() {
   const mine = records().find(r => r.date === today && r.sn === session.sn);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
-  else if (mine) top = `<p>Today you are holding</p><div class="big">${mine.pc === 'Personal' ? 'Personal PC' : 'PC ' + mine.pc}</div>
-      <p>${mine.pc === 'Personal' ? 'The admin recorded that you are using your own PC today.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.group ? ' Group: ' + esc(mine.group) + '.' : ''}</p>`;
+  else if (mine) top = `<p>Today you are holding</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : 'PC ' + mine.pc}</div>
+      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.group ? ' Group: ' + esc(mine.group) + '.' : ''}</p>`;
   else {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
+    const pcells = personalNums().map(n => `<button class="pc ${pick === n ? 'sel' : ''}" ${taken(today, n) ? 'disabled' : ''} onclick="choose(${n})">${n}</button>`).join('');
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
+      ${pcells ? `<p>Using your own PC? Pick a personal PC number:</p><div class="grid">${pcells}</div>` : ''}
       ${assignedGroup() ? `<p>Your group: <b>${esc(assignedGroup())}</b></p>` : (settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
-      <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? 'Sign for PC ' + pick : 'Choose a PC first'}</button>`;
+      <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? (personalNums().includes(pick) ? 'Sign for personal PC ' : 'Sign for PC ') + pick : 'Choose a PC first'}</button>`;
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
   $('app').innerHTML = `
@@ -257,7 +262,7 @@ async function sign() {
     if (d > lab.radius) { busy = false; return say(`You are about ${Math.round(d)} m from the lab. You must be within ${lab.radius} m to sign.`); }
   } catch (e) { busy = false; return say(geoMsg(e)); }
   busy = false;
-  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: grp, pc: pick, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: grp, pc: pick, personal: personalNums().includes(pick), time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
   const ref = fs.collection('records').doc(rec.id);
   try {
     await fs.runTransaction(async tx => { if ((await tx.get(ref)).exists) throw new Error('taken'); tx.set(ref, rec); });
@@ -278,7 +283,7 @@ function inRange() {
 function adminView() {
   const list = inRange(), st = settings();
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
-  const personal = records().filter(r => r.pc === 'Personal' && r.date >= ymd(wk) && r.date <= ymd(fri))
+  const personal = records().filter(r => isP(r) && r.date >= ymd(wk) && r.date <= ymd(fri))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
@@ -295,15 +300,22 @@ function adminView() {
     ${(st.groups || []).length ? `<div class="wrap"><table>${st.groups.map((g, i) => `<tr><td>${esc(g)} (${users().filter(u => u.group === g).length} students)</td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add at least one.</p>'}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
+  <div class="card"><h2>Personal PC numbers</h2>
+    <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
+    ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
+    <div class="row"><div><label for="pnc">How many numbers to add</label><input id="pnc" type="number" min="1" max="50" value="5"></div>
+    <div><label for="pnn">Or one exact number (200 or more)</label><input id="pnn" type="number" min="200"></div></div>
+    <button onclick="addPersonalNums()">Add numbers</button></div>
   <div class="card"><h2>Personal PC</h2>
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
-    <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${(st.groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select></div></div>
+    <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${(st.groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select></div>
+    <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
     <button onclick="markPersonal()">Mark as personal PC</button>
     <h2 style="margin-top:20px">Using a personal PC this week</h2>
-    ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th></th></tr>${personal.map(r =>
-      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
+    ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th></th></tr>${personal.map(r =>
+      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${pcLabel(r)}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
   <div class="card"><h2>Admins (up to 2)</h2>
     <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
     ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
@@ -338,8 +350,9 @@ function setRange() {
 const isAdmin = () => session && session.role === 'admin';
 function saveTotal() {
   if (!isAdmin()) return;
-  const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().map(r => +r.pc || 0));
+  const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().filter(r => !isP(r)).map(r => +r.pc || 0));
   if (!n || n < 1) return say('Enter a valid number.');
+  if (n >= 200) return say('Lab PCs must be under 200. Numbers from 200 are for personal PCs.');
   if (n < maxUsed) return say(`PC ${maxUsed} is already in the records. Number cannot be lower.`);
   saveSettings({ ...settings(), totalPCs: n }).then(() => say('Saved.', true), () => say('Could not save.'));
 }
@@ -368,6 +381,25 @@ function assignGroup(i, group) {
   const u = users()[i];
   fs.collection('users').doc(u.sn).update({ group }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
 }
+function addPersonalNums() {
+  if (!isAdmin()) return;
+  const cur = personalNums(), one = parseInt($('pnn').value, 10), cnt = parseInt($('pnc').value, 10);
+  let add = [];
+  if ($('pnn').value) {
+    if (!one || one < 200) return say('A personal number must be 200 or more.');
+    if (cur.includes(one)) return say(`${one} is already in the list.`);
+    add = [one];
+  } else {
+    if (!cnt || cnt < 1 || cnt > 50) return say('Add between 1 and 50 numbers.');
+    const start = Math.max(199, ...cur) + 1;
+    add = Array.from({ length: cnt }, (_, k) => start + k);
+  }
+  saveSettings({ ...settings(), personalPCs: [...cur, ...add] }).then(() => say(`Added: ${add.join(', ')}.`, true), () => say('Could not save.'));
+}
+function removePersonalNum(n) {
+  if (!isAdmin() || !confirm(`Remove personal number ${n}? Old sign-ins keep it.`)) return;
+  saveSettings({ ...settings(), personalPCs: personalNums().filter(x => x !== n) }).then(() => render());
+}
 function addGroup() {
   if (!isAdmin()) return;
   const g = $('gn').value.trim(), gr = settings().groups || [];
@@ -387,7 +419,9 @@ async function markPersonal() {
   if (!u) return say('Choose a student.');
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
   if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has a sign-in on that day. Remove it first.');
-  const t = new Date(), rec = { id: `${date}_personal_${sn}`, date, sn, name: u.name, group, pc: 'Personal', time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const num = parseInt($('pn').value, 10) || 0;
+  if (num && records().some(r => r.date === date && r.pc === num)) return say(`Personal PC ${num} is already taken on that day.`);
+  const t = new Date(), rec = { id: num ? `${date}_pc${num}` : `${date}_personal_${sn}`, date, sn, name: u.name, group, pc: num || 'Personal', personal: true, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
   await fs.collection('records').doc(rec.id).set(rec);
   say(`${esc(u.name)} is marked as using a personal PC on ${date}.`, true);
 }
@@ -420,8 +454,8 @@ async function resetStudent(i) {
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${r.pc}</td><td>${r.time}</td>` +
-      (admin ? `<td>${r.pc === 'Personal' ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${pcLabel(r)}</td><td>${r.time}</td>` +
+      (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function editPc(id) {
   if (!isAdmin()) return;
@@ -517,7 +551,7 @@ function reportName() {
   if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `PC-register-week-${ymd(m)}-to-${ymd(f)}`; }
   return `PC-register-month-${range.value.slice(0, 7)}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.group || '', r.pc, r.time]);
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.group || '', pcLabel(r), r.time]);
 const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group', 'PC', 'Time'];
 function exportXlsx() {
   const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
