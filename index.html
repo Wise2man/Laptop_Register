@@ -43,6 +43,7 @@ nav a.on{border-bottom-color:var(--acc);font-weight:bold}
 nav a:focus-visible{outline:3px solid var(--acc)}
 .rep{border:1px solid var(--line);border-left:5px solid var(--mute);border-radius:6px;padding:10px;margin:10px 0;font-size:14px}
 .rep.approved{border-left-color:var(--ok)}.rep.rejected{border-left-color:var(--bad)}
+.signature-pad{display:block;width:100%;max-width:560px;height:150px;background:#fff;border:1px solid var(--line);border-radius:4px;touch-action:none}
 h3{margin:16px 0 6px;font-size:16px}
 code{background:var(--bg);padding:2px 5px;border-radius:4px}
 </style>
@@ -93,6 +94,8 @@ let session = null;
 try { session = JSON.parse(localStorage.getItem('pcreg_session')); } catch {}
 const keepSession = () => localStorage.setItem('pcreg_session', JSON.stringify(session));
 let msg = '', tab = 'login', pick = null;
+let signatureDrawn = false, signatureActive = false;
+let signatureMessage = '';
 
 function fail(e) {
   $('app').innerHTML = `<div class="card"><h2>Cannot reach the online database</h2>
@@ -123,7 +126,7 @@ function start() {
 function refresh() {
   if (!ready()) return;
   const a = document.activeElement;
-  if (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // do not wipe what someone is typing
+  if (signatureActive || signatureDrawn || a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // preserve active form input and signature drawing
   render();
 }
 
@@ -134,6 +137,7 @@ function render() {
     ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
   $('nav').innerHTML = '';
   if (!session) return authView();
+  if (session.role === 'student' && !studentProfile().signature) return signatureSetupView();
   const adm = session.role === 'admin', n = liveReports().filter(r => r.status === 'pending').length;
   $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${adm ? 'Admin' : 'Register'}</a>` +
     `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${adm ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>` +
@@ -147,6 +151,7 @@ window.addEventListener('hashchange', () => { msg = ''; render(); });
 function authView() {
   const needAdmin = !settings().admins.length;
   if (!needAdmin && tab === 'admin') tab = 'login';
+  signatureDrawn = false; signatureActive = false;
   $('app').innerHTML = `
   <div class="card">
     <div class="tabs">
@@ -158,6 +163,8 @@ function authView() {
       <label for="n">Full name</label><input id="n" autocomplete="name">
       <label for="s">Student number</label><input id="s" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,13)">
       <label for="p">Password (at least 6 characters)</label><input id="p" type="password">
+      <label for="signature">Write your signature</label><canvas id="signature" class="signature-pad" width="560" height="150" aria-label="Signature drawing area"></canvas>
+      <button type="button" class="alt" onclick="clearSignature()">Clear signature</button>
       <button onclick="signup()">Create account</button>` :
     tab === 'login' ? `
       <label for="s">Student number or admin username</label><input id="s" autocapitalize="off">
@@ -169,20 +176,57 @@ function authView() {
       <button onclick="setupAdmin()">Create admin and log in</button>`}
     <div class="msg err">${msg}</div>
   </div>`;
+  if (tab === 'signup') initSignaturePad();
+}
+function initSignaturePad() {
+  const canvas = $('signature'), context = canvas.getContext('2d');
+  context.lineWidth = 3; context.lineCap = 'round'; context.lineJoin = 'round'; context.strokeStyle = '#17212b';
+  const point = event => { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height }; };
+  canvas.addEventListener('pointerdown', event => { event.preventDefault(); canvas.setPointerCapture(event.pointerId); const p = point(event); context.beginPath(); context.moveTo(p.x, p.y); signatureActive = true; });
+  canvas.addEventListener('pointermove', event => { if (!canvas.hasPointerCapture(event.pointerId)) return; const p = point(event); context.lineTo(p.x, p.y); context.stroke(); signatureDrawn = true; });
+  canvas.addEventListener('pointerup', () => { signatureActive = false; });
+  canvas.addEventListener('pointercancel', () => { signatureActive = false; });
+}
+function clearSignature() {
+  const canvas = $('signature');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  signatureDrawn = false; signatureActive = false;
+}
+function signatureSetupView() {
+  signatureDrawn = false; signatureActive = false;
+  $('app').innerHTML = `<div class="card"><h2>Complete your signature</h2>
+    <p>Write your signature once to finish setting up your attendance account.</p>
+    <label for="signature">Write your signature</label><canvas id="signature" class="signature-pad" width="560" height="150" aria-label="Signature drawing area"></canvas>
+    <button type="button" class="alt" onclick="clearSignature()">Clear signature</button>
+    <button onclick="saveLoginSignature()">Save signature</button><div id="signatureMessage" class="msg err">${esc(signatureMessage)}</div></div>`;
+  initSignaturePad();
+}
+async function saveLoginSignature() {
+  if (!session || session.role !== 'student') return;
+  const signature = signatureDrawn ? $('signature').toDataURL('image/png') : '';
+  if (!signature) { $('signatureMessage').textContent = 'Please draw your signature first.'; return; }
+  try {
+    await fs.collection('users').doc(session.sn).update({ signature });
+    const profile = users().find(u => u.sn === session.sn);
+    if (profile) profile.signature = signature;
+    signatureMessage = ''; signatureDrawn = false; render();
+  } catch (e) { $('signatureMessage').textContent = 'Could not save your signature. Check your internet and try again.'; }
 }
 const setTab = t => { tab = t; msg = ''; render(); };
 const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render(); };
 
 async function signup() {
   const name = $('n').value.trim(), sn = $('s').value.trim().toUpperCase(), p = $('p').value;
+  const signature = signatureDrawn ? $('signature').toDataURL('image/png') : '';
   if (!name || !sn) return say('Please fill in your name and student number.');
   if (!/^\d{1,13}$/.test(sn)) return say('Student number must contain only digits and be no more than 13 digits.');
+  if (!signature) return say('Please write your signature before creating the account.');
   if (findAdmin(sn)) return say('This student number is not allowed.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   try {
     const ref = fs.collection('users').doc(sn);
     if ((await ref.get()).exists) return say('This student number already has an account. Please log in.');
-    await ref.set({ name, sn, pw: await hash(sn + ':' + p) });
+    await ref.set({ name, sn, pw: await hash(sn + ':' + p), signature });
     tab = 'login'; say('Account created. You can log in now.', true);
   } catch (e) { say('Could not save. Check your internet.'); }
 }
@@ -196,7 +240,7 @@ async function login() {
     if (!u || u.pw !== await hash(sn + ':' + p)) return say('Wrong username or password.');
     session = { role: 'student', sn, name: u.name };
   }
-  keepSession(); msg = ''; render();
+  myGroup = ''; myStudentType = ''; signatureMessage = ''; keepSession(); msg = ''; render();
 }
 async function setupAdmin() {
   if (settings().admins.length) return say('An admin already exists. Please log in.');
@@ -207,7 +251,7 @@ async function setupAdmin() {
   await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p) }] });
   session = { role: 'admin', name: user, user }; keepSession(); msg = ''; render();
 }
-function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; render(); }
+function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; myGroup = ''; myStudentType = ''; signatureMessage = ''; render(); }
 
 /* ---------- Location ---------- */
 function distance(a, b, c, d) {
@@ -222,23 +266,38 @@ const getPos = () => new Promise((ok, no) => {
 const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this page in your browser settings, then try again.'
   : e.code === 3 ? 'Finding your location took too long. Go near a window, switch on GPS, and try again.'
   : 'Could not find your location. Switch on location and try again.';
-let busy = false, myGroup = '';
+let busy = false, myGroup = '', myStudentType = '';
 const studentProfile = () => users().find(u => u.sn === session.sn) || {};
 const assignedGroup = () => studentProfile().group || '';
 const groupLocked = () => Boolean(studentProfile().group || studentProfile().groupLocked);
+const LEGACY_PERSONAL_GROUP = 'Lab Personal PC';
+const isLegacyPersonalGroup = group => {
+  const value = String(group || '').trim().toLowerCase(), prefix = LEGACY_PERSONAL_GROUP.toLowerCase();
+  return value === prefix || value.startsWith(prefix + ' ') || value.startsWith(prefix + '-') || value.startsWith(prefix + '(');
+};
+const DEFAULT_STUDENT_TYPES = ['Interns', 'Work Integrated Learning'];
+const studentTypes = () => settings().studentTypes || DEFAULT_STUDENT_TYPES;
+const usesStudentType = () => Boolean(studentProfile().personalPCProgram || isLegacyPersonalGroup(assignedGroup()));
+function groupYearFor(group) { return (settings().groupYears || {})[group] || ''; }
+function groupLabel(group, year) {
+  const labelYear = year === undefined ? groupYearFor(group) : year;
+  return `${group || ''}${labelYear ? ` - ${labelYear}` : ''}`;
+}
 const personalNums = () => [...(settings().personalPCs || [])].sort((a, b) => a - b);
 const isP = r => r.personal || r.pc === 'Personal';
 const pcLabel = r => r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
+const attendanceStudentType = r => r.studentType || (isLegacyPersonalGroup(r.group) && (users().find(u => u.sn === r.sn) || {}).studentType) || '';
+const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStudentType(r) || 'Student type needed') : r.group ? groupLabel(r.group, r.groupYear) : attendanceStudentType(r);
 
 /* ---------- Student ---------- */
-const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc);
+const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc && !r.returnedAt);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs;
-  const mine = records().find(r => r.date === today && r.sn === session.sn);
+  const mine = records().find(r => r.date === today && r.sn === session.sn && !r.returnedAt);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
   else if (mine) top = `<p>Today you are holding</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : 'PC ' + mine.pc}</div>
-      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.group ? ' Group: ' + esc(mine.group) + '.' : ''}</p>`;
+      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.studentType ? ' Student type: ' + esc(mine.studentType) + '.' : mine.group ? ' Group: ' + esc(groupLabel(mine.group, mine.groupYear)) + '.' : ''}</p>`;
   else {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
@@ -246,7 +305,7 @@ function studentView() {
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
       ${pcells ? `<p>Using your own PC? Pick a personal PC number:</p><div class="grid">${pcells}</div>` : ''}
-      ${assignedGroup() ? `<p>Your group: <b>${esc(assignedGroup())}</b> (ask an admin to change it)</p>` : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>' : (settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
+      ${usesStudentType() ? (studentProfile().studentType ? `<p>Your student type: <b>${esc(studentProfile().studentType)}</b> (ask an admin to change it)</p>` : `<label for="studentType">Choose your student type</label><select id="studentType" onchange="myStudentType=this.value"><option value="">Choose a type</option>${studentTypes().map(x => `<option value="${esc(x)}" ${x === myStudentType ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`) : assignedGroup() ? `<p>Your group: <b>${esc(groupLabel(assignedGroup()))}</b> (ask an admin to change it)</p>` : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>' : (settings().groups || []).some(g => !isLegacyPersonalGroup(g)) ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}" ${g === myGroup ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
       <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? (personalNums().includes(pick) ? 'Sign for personal PC ' : 'Sign for PC ') + pick : 'Choose a PC first'}</button>`;
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
@@ -258,9 +317,11 @@ const choose = i => { pick = i; render(); };
 async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
-  if (records().some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
-  const grp = assignedGroup() || (groupLocked() ? '' : myGroup);
-  if (!grp) return say(groupLocked() ? 'Your group has not been assigned. Please ask an admin.' : 'Please choose your group.');
+  if (records().some(x => x.date === today && x.sn === session.sn && !x.returnedAt)) return say('You already have a PC checked out.');
+  const studentType = usesStudentType() ? studentProfile().studentType || myStudentType : '';
+  const grp = usesStudentType() ? '' : assignedGroup() || (groupLocked() ? '' : myGroup);
+  if (usesStudentType() && !studentType) return say('Please choose your student type.');
+  if (!usesStudentType() && !grp) return say(groupLocked() ? 'Your group has not been assigned. Please ask an admin.' : 'Please choose your group.');
   const lab = settings().lab;
   if (!lab) return say('The admin has not set the lab location yet. Please tell the admin.');
   if (busy) return;
@@ -270,16 +331,19 @@ async function sign() {
     if (d > lab.radius) { busy = false; return say(`You are about ${Math.round(d)} m from the lab. You must be within ${lab.radius} m to sign.`); }
   } catch (e) { busy = false; return say(geoMsg(e)); }
   busy = false;
-  const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: grp, pc: pick, personal: personalNums().includes(pick), time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
-  const ref = fs.collection('records').doc(rec.id);
+  const t = new Date(), slotId = `${today}_pc${pick}`;
+  const rec = { id: `${slotId}_${session.sn}_${t.getTime()}`, date: today, sn: session.sn, name: session.name, group: grp, groupYear: groupYearFor(grp), studentType, signature: studentProfile().signature || '', signedAt: t.getTime(), pc: pick, personal: personalNums().includes(pick), time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const ref = fs.collection('records').doc(rec.id), slotRef = fs.collection('slots').doc(slotId), legacyRef = fs.collection('records').doc(slotId);
   try {
     const userRef = fs.collection('users').doc(session.sn);
     await fs.runTransaction(async tx => {
-      const existing = await tx.get(ref), user = await tx.get(userRef);
-      if (existing.exists) throw new Error('taken');
+      const existing = await tx.get(ref), user = await tx.get(userRef), slot = await tx.get(slotRef), legacy = await tx.get(legacyRef);
+      if (existing.exists || slot.exists || (legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
       tx.set(ref, rec);
+      tx.set(slotRef, { recordId: rec.id });
       const profile = user.data() || {};
-      if (!profile.group && !profile.groupLocked) tx.update(userRef, { group: grp, groupLocked: true });
+      if (usesStudentType()) tx.update(userRef, { group: '', studentType, personalPCProgram: true, groupLocked: true });
+      else if (!profile.group && !profile.groupLocked) tx.update(userRef, { group: grp, groupLocked: true });
     });
     pick = null; render();
   } catch (e) { pick = null; say(e.message === 'taken' ? 'Someone just took that PC. Pick another one.' : 'Could not save. Check your internet and try again.'); }
@@ -296,7 +360,7 @@ function inRange() {
   return [...list].sort((a, b) => a.date.localeCompare(b.date) || String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
 }
 function adminView() {
-  const list = inRange(), st = settings();
+  const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
   const personal = records().filter(r => isP(r) && r.date >= ymd(wk) && r.date <= ymd(fri))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
@@ -313,9 +377,14 @@ function adminView() {
     <button onclick="setLab()">Use this device's location as the lab</button>
     ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>
   <div class="card"><h2>Groups</h2>
-    ${(st.groups || []).length ? `<div class="wrap"><table>${st.groups.map((g, i) => `<tr><td>${esc(g)} (${users().filter(u => u.group === g).length} students)</td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add at least one.</p>'}
+    ${groups.length ? `<div class="wrap"><table>${groups.map(g => { const i = st.groups.indexOf(g); return `<tr><td>${esc(groupLabel(g))} (${users().filter(u => u.group === g).length} students)</td><td><label>Year <input aria-label="Year for ${esc(g)}" maxlength="24" value="${esc(groupYearFor(g))}" onchange="setGroupYear(${i}, this.value)"></label></td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`; }).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add one.</p>'}
+    ${(st.groups || []).some(isLegacyPersonalGroup) ? `<p>“${LEGACY_PERSONAL_GROUP}” is treated as a student type category, not a group.</p><button class="sm alt" onclick="removeLegacyPersonalGroup()">Remove legacy group entry</button>` : ''}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
+  <div class="card"><h2>Student types</h2><p>For students formerly listed under ${LEGACY_PERSONAL_GROUP}; these are separate from groups.</p>
+    <div class="wrap"><table>${studentTypes().map((type, i) => `<tr><td>${esc(type)}</td><td>${users().filter(u => u.studentType === type).length} students</td><td><button class="sm alt" onclick="removeStudentType(${i})">Remove</button></td></tr>`).join('')}</table></div>
+    <label for="newStudentType">New student type</label><input id="newStudentType" maxlength="50">
+    <button onclick="addStudentType()">Add student type</button></div>
   <div class="card"><h2>Personal PC numbers</h2>
     <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
     ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
@@ -326,12 +395,12 @@ function adminView() {
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
-    <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${(st.groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select></div>
+    <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div>
     <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
     <button onclick="markPersonal()">Mark as personal PC</button>
     <h2 style="margin-top:20px">Using a personal PC this week</h2>
     ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th></th></tr>${personal.map(r =>
-      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${pcLabel(r)}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
+      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
   <div class="card"><h2>Admins (up to 2)</h2>
     <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
     ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
@@ -342,9 +411,9 @@ function adminView() {
     <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
     <button onclick="changeAdminPw()">Change admin password</button></div>
   <div class="card"><h2>Students</h2>
-    <p>Choose a group for each student. Their group is used when they sign.</p>
-    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th>Group</th><th></th></tr>${users().map((u, i) =>
-      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><select style="min-width:130px" aria-label="Group for ${esc(u.name)}" onchange="assignGroup(${i}, this.value)"><option value="">(none)</option>${groupOpts(u.group)}</select></td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
+    <p>Assign regular groups or, for Lab Personal PC students, a separate student type.</p>
+    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th>Group</th><th>Student type</th><th></th></tr>${users().map((u, i) =>
+      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><select style="min-width:130px" aria-label="Group for ${esc(u.name)}" onchange="assignGroup(${i}, this.value)"><option value="" ${(isLegacyPersonalGroup(u.group) || !u.group) ? 'selected' : ''}>${isLegacyPersonalGroup(u.group) ? 'Lab Personal PC (choose type)' : '(none)'}</option>${groupOpts(u.group)}</select></td><td><select style="min-width:170px" aria-label="Student type for ${esc(u.name)}" onchange="assignStudentType(${i}, this.value)"><option value="">(none)</option>${studentTypes().map(type => `<option value="${esc(type)}" ${u.studentType === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
   <div class="card"><h2>Reports</h2>
     <div class="row">
       <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
@@ -354,20 +423,23 @@ function adminView() {
         <input id="rv" type="${range.type === 'week' ? 'date' : 'month'}" value="${range.type === 'week' ? range.value : range.value.slice(0, 7)}" onchange="setRange()"></div>
     </div>
     <button onclick="exportXlsx()">Download Excel</button><button onclick="exportPdf()">Download PDF</button>
-    <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p></div>`;
+    <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p>
+    <h3>Group attendance register</h3>
+    <div class="row"><div><label for="groupExport">Group</label><select id="groupExport">${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div></div>
+    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div>`;
 }
 let dayView = { date: ymd(new Date()), mode: 'group' };
 function dayCard() {
   const recs = records().filter(r => r.date === dayView.date)
     .sort((a, b) => String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
-  const pers = recs.filter(isP).length, names = [...(settings().groups || [])];
-  recs.forEach(r => { if (r.group && !names.includes(r.group)) names.push(r.group); });
-  const cnt = g => recs.filter(r => r.group === g).length, nog = recs.filter(r => !r.group);
+  const pers = recs.filter(isP).length, names = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
+  recs.forEach(r => { if (r.group && !isLegacyPersonalGroup(r.group) && !names.includes(r.group)) names.push(r.group); });
+  const cnt = g => recs.filter(r => r.group === g).length, nog = recs.filter(r => (!r.group || isLegacyPersonalGroup(r.group)) && !attendanceStudentType(r)), typed = recs.filter(r => attendanceStudentType(r));
   let body;
   if (dayView.mode === 'all') {
-    body = `<h3>Totals</h3><div class="wrap"><table><tr><th>Group</th><th>Signed in</th></tr>${names.map(g => `<tr><td>${esc(g)}</td><td>${cnt(g)}</td></tr>`).join('')}${nog.length ? `<tr><td>No group</td><td>${nog.length}</td></tr>` : ''}<tr><th>All groups</th><th>${recs.length}</th></tr></table></div><h3>Whole list</h3>${table(recs, true)}`;
+    body = `<h3>Group totals</h3><div class="wrap"><table><tr><th>Group</th><th>Signed in</th></tr>${names.map(g => `<tr><td>${esc(groupLabel(g))}</td><td>${cnt(g)}</td></tr>`).join('')}${nog.length ? `<tr><td>No group / student type</td><td>${nog.length}</td></tr>` : ''}<tr><th>All students</th><th>${recs.length}</th></tr></table></div>${typed.length ? `<h3>Student type totals</h3><div class="wrap"><table>${studentTypes().map(type => `<tr><td>${esc(type)}</td><td>${typed.filter(r => attendanceStudentType(r) === type).length}</td></tr>`).join('')}</table></div>` : ''}<h3>Whole list</h3>${table(recs, true)}`;
   } else if (!names.length) body = table(recs, true);
-  else body = names.map(g => `<h3>${esc(g)} (${cnt(g)})</h3>${cnt(g) ? table(recs.filter(r => r.group === g), true) : '<p>Nobody yet.</p>'}`).join('') + (nog.length ? `<h3>No group (${nog.length})</h3>${table(nog, true)}` : '');
+  else body = names.map(g => `<h3>${esc(groupLabel(g))} (${cnt(g)})</h3>${cnt(g) ? table(recs.filter(r => r.group === g), true) : '<p>Nobody yet.</p>'}`).join('') + studentTypes().filter(type => typed.some(r => attendanceStudentType(r) === type)).map(type => { const list = typed.filter(r => attendanceStudentType(r) === type); return `<h3>Student type: ${esc(type)} (${list.length})</h3>${table(list, true)}`; }).join('') + (nog.length ? `<h3>No group / student type (${nog.length})</h3>${table(nog.filter(r => !attendanceStudentType(r)), true)}` : '');
   return `<div class="card"><h2>Register for a day</h2>
     <div class="row"><div><label for="dd">Date</label><input id="dd" type="date" value="${dayView.date}" onchange="setDay()"></div>
     <div><label for="dm">View</label><select id="dm" onchange="setDay()"><option value="group" ${dayView.mode === 'group' ? 'selected' : ''}>By group</option><option value="all" ${dayView.mode === 'all' ? 'selected' : ''}>Whole list (with totals)</option></select></div></div>
@@ -409,13 +481,29 @@ function saveRadius() {
   saveSettings({ ...settings(), lab: { ...settings().lab, radius } }).then(() => say('Distance saved.', true), () => say('Could not save.'));
 }
 const groupOpts = cur => {
-  const g = settings().groups || [], all = cur && !g.includes(cur) ? [...g, cur] : g;
-  return all.map(x => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  const g = (settings().groups || []).filter(x => !isLegacyPersonalGroup(x)), all = cur && !isLegacyPersonalGroup(cur) && !g.includes(cur) ? [...g, cur] : g;
+  return all.map(x => `<option value="${esc(x)}" ${x === cur ? 'selected' : ''}>${esc(groupLabel(x))}</option>`).join('');
 };
 function assignGroup(i, group) {
   if (!isAdmin()) return;
   const u = users()[i];
-  fs.collection('users').doc(u.sn).update({ group, groupLocked: true }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
+  const personalPCProgram = !group && Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group));
+  fs.collection('users').doc(u.sn).update({ group, groupLocked: true, personalPCProgram, studentType: group ? '' : (u.studentType || '') }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
+}
+function assignStudentType(i, type) {
+  if (!isAdmin()) return;
+  const u = users()[i], personalPCProgram = Boolean(type || u.personalPCProgram || isLegacyPersonalGroup(u.group));
+  const group = personalPCProgram ? '' : (u.group || '');
+  fs.collection('users').doc(u.sn).update({ group, studentType: type, personalPCProgram, groupLocked: true })
+    .then(() => say(type ? `${esc(u.name)} is now classified as ${esc(type)}.` : `${esc(u.name)} student type cleared.`, true), () => say('Could not save.'));
+}
+function setGroupYear(i, year) {
+  if (!isAdmin()) return;
+  const group = settings().groups[i], value = year.trim();
+  if (value.length > 24) return say('Group year must be 24 characters or fewer.');
+  const groupYears = { ...(settings().groupYears || {}) };
+  if (value) groupYears[group] = value; else delete groupYears[group];
+  saveSettings({ ...settings(), groupYears }).then(() => say(`Updated ${esc(groupLabel(group))}.`, true), () => say('Could not save group year.'));
 }
 function addPersonalNums() {
   if (!isAdmin()) return;
@@ -440,6 +528,7 @@ function addGroup() {
   if (!isAdmin()) return;
   const g = $('gn').value.trim(), gr = settings().groups || [];
   if (!g) return say('Type a group name.');
+  if (isLegacyPersonalGroup(g)) return say('Lab Personal PC is a student type category, not a group.');
   if (gr.some(x => x.toLowerCase() === g.toLowerCase())) return say('That group already exists.');
   saveSettings({ ...settings(), groups: [...gr, g] }).then(() => say('Group added.', true), () => say('Could not save.'));
 }
@@ -447,19 +536,54 @@ function removeGroup(i) {
   if (!isAdmin()) return;
   const gr = [...(settings().groups || [])];
   if (!confirm(`Remove group ${gr[i]}? Students and old sign-ins keep this name.`)) return;
-  gr.splice(i, 1); saveSettings({ ...settings(), groups: gr }).then(() => render());
+  const groupYears = { ...(settings().groupYears || {}) };
+  delete groupYears[gr[i]];
+  gr.splice(i, 1); saveSettings({ ...settings(), groups: gr, groupYears }).then(() => render());
+}
+function removeLegacyPersonalGroup() {
+  if (!isAdmin()) return;
+  const gr = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
+  const groupYears = { ...(settings().groupYears || {}) }; Object.keys(groupYears).filter(isLegacyPersonalGroup).forEach(g => delete groupYears[g]);
+  saveSettings({ ...settings(), groups: gr, groupYears }).then(() => say('Lab Personal PC removed from the group list. Existing students will choose a student type.', true), () => say('Could not update groups.'));
+}
+function addStudentType() {
+  if (!isAdmin()) return;
+  const type = $('newStudentType').value.trim(), types = studentTypes();
+  if (!type) return say('Type a student type.');
+  if (types.some(x => x.toLowerCase() === type.toLowerCase())) return say('That student type already exists.');
+  saveSettings({ ...settings(), studentTypes: [...types, type] }).then(() => say('Student type added.', true), () => say('Could not save student type.'));
+}
+function removeStudentType(i) {
+  if (!isAdmin()) return;
+  const type = studentTypes()[i];
+  if (!type) return;
+  if (studentTypes().length < 2) return say('Keep at least one student type.');
+  if (users().some(u => u.studentType === type)) return say('Reassign students before removing this type.');
+  saveSettings({ ...settings(), studentTypes: studentTypes().filter((_, index) => index !== i) }).then(() => say('Student type removed.', true), () => say('Could not remove student type.'));
 }
 async function markPersonal() {
   if (!isAdmin()) return;
-  const sn = $('pp').value, date = $('pd').value, u = users().find(x => x.sn === sn), group = $('pg').value || (u && u.group) || '';
+  const sn = $('pp').value, date = $('pd').value, u = users().find(x => x.sn === sn);
   if (!u) return say('Choose a student.');
+  const personalPCProgram = Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group)), group = personalPCProgram ? '' : $('pg').value || u.group || '', studentType = personalPCProgram ? u.studentType || '' : '';
+  if (personalPCProgram && !studentType) return say('Assign a student type before marking this student present.');
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
-  if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has a sign-in on that day. Remove it first.');
+  if (records().some(r => r.date === date && r.sn === sn && !r.returnedAt)) return say('This student already has a PC checked out.');
   const num = parseInt($('pn').value, 10) || 0;
-  if (num && records().some(r => r.date === date && r.pc === num)) return say(`Personal PC ${num} is already taken on that day.`);
-  const t = new Date(), rec = { id: num ? `${date}_pc${num}` : `${date}_personal_${sn}`, date, sn, name: u.name, group, pc: num || 'Personal', personal: true, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
-  await fs.collection('records').doc(rec.id).set(rec);
-  say(`${esc(u.name)} is marked as using a personal PC on ${date}.`, true);
+  if (num && taken(date, num)) return say(`Personal PC ${num} is already taken on that day.`);
+  const t = new Date(), slotId = num ? `${date}_pc${num}` : '', rec = { id: `${slotId || `${date}_personal_${sn}`}_${t.getTime()}`, date, sn, name: u.name, group, groupYear: groupYearFor(group), studentType, signature: u.signature || '', signedAt: t.getTime(), pc: num || 'Personal', personal: true, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
+  const ref = fs.collection('records').doc(rec.id);
+  try {
+    if (num) {
+      const slotRef = fs.collection('slots').doc(slotId), legacyRef = fs.collection('records').doc(slotId);
+      await fs.runTransaction(async tx => {
+        const slot = await tx.get(slotRef), legacy = await tx.get(legacyRef), existing = await tx.get(ref);
+        if (slot.exists || existing.exists || (legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
+        tx.set(ref, rec); tx.set(slotRef, { recordId: rec.id });
+      });
+    } else await ref.set(rec);
+    say(`${esc(u.name)} is marked as using a personal PC on ${date}.`, true);
+  } catch (e) { say(e.message === 'taken' ? `Personal PC ${num} is already taken on that day.` : 'Could not save.'); }
 }
 async function addAdmin() {
   if (!isAdmin()) return;
@@ -489,9 +613,24 @@ async function resetStudent(i) {
 }
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
-  return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th>Time</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(r.group || '')}</td><td>${pcLabel(r)}</td><td>${r.time}</td>` +
+  return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? new Date(r.returnedAt).toLocaleString() : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
       (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+}
+async function returnPc(id) {
+  if (!isAdmin()) return;
+  const rec = records().find(x => x.id === id);
+  if (!rec || rec.returnedAt || isP(rec) || !confirm(`Record that ${rec.name} returned PC ${rec.pc}?`)) return;
+  const returnedAt = Date.now(), recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`);
+  try {
+    await fs.runTransaction(async tx => {
+      const record = await tx.get(recRef), slot = await tx.get(slotRef);
+      if (!record.exists || record.data().returnedAt) throw new Error('returned');
+      tx.update(recRef, { returnedAt, returnedBy: session.user });
+      if (slot.exists && slot.data().recordId === id) tx.delete(slotRef);
+    });
+    say(`Return recorded at ${new Date(returnedAt).toLocaleTimeString()}.`, true);
+  } catch (e) { say(e.message === 'returned' ? 'This PC has already been returned.' : 'Could not record the return.'); }
 }
 async function editPc(id) {
   if (!isAdmin()) return;
@@ -501,15 +640,31 @@ async function editPc(id) {
   const n = parseInt(v, 10);
   if (!n || n < 1 || n > settings().totalPCs) return say('That PC number does not exist.');
   if (n === rec.pc) return;
-  const nr = { ...rec, pc: n, id: `${rec.date}_pc${n}` }, oref = fs.collection('records').doc(rec.id), nref = fs.collection('records').doc(nr.id);
+  const oref = fs.collection('records').doc(rec.id), oldSlot = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`), newSlot = fs.collection('slots').doc(`${rec.date}_pc${n}`), legacyRef = fs.collection('records').doc(`${rec.date}_pc${n}`);
   try {
-    await fs.runTransaction(async tx => { if ((await tx.get(nref)).exists) throw new Error('taken'); tx.delete(oref); tx.set(nref, nr); });
+    await fs.runTransaction(async tx => {
+      const current = await tx.get(oref), targetSlot = await tx.get(newSlot), legacy = await tx.get(legacyRef), sourceSlot = await tx.get(oldSlot);
+      if (!current.exists || targetSlot.exists && targetSlot.data().recordId !== id || legacy.exists && legacy.id !== id && !legacy.data().returnedAt) throw new Error('taken');
+      tx.update(oref, { pc: n });
+      if (!rec.returnedAt) {
+        if (sourceSlot.exists && sourceSlot.data().recordId === id) tx.delete(oldSlot);
+        tx.set(newSlot, { recordId: id });
+      }
+    });
     say('PC number changed.', true);
   } catch (e) { say(e.message === 'taken' ? `PC ${n} is already taken on that day.` : 'Could not save.'); }
 }
 async function removeRec(id) {
   if (!isAdmin() || !confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
-  await fs.collection('records').doc(id).delete(); render();
+  const rec = records().find(x => x.id === id);
+  if (!rec) return;
+  const recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`);
+  await fs.runTransaction(async tx => {
+    const record = await tx.get(recRef), slot = await tx.get(slotRef);
+    if (record.exists) tx.delete(recRef);
+    if (slot.exists && slot.data().recordId === id) tx.delete(slotRef);
+  });
+  render();
 }
 
 /* ---------- Absence reports ---------- */
@@ -594,7 +749,7 @@ async function uploadFile(path, file) {
 }
 function updateCard(item, admin) {
   const fileLinks = (item.files || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join('<br>');
-  return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(item.group || 'All students')} · ${new Date(item.created).toLocaleString()}</small>
+  return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(item.group ? groupLabel(item.group) : 'All students')} · ${new Date(item.created).toLocaleString()}</small>
     ${item.message ? `<p>${esc(item.message).replace(/\n/g, '<br>')}</p>` : ''}${fileLinks ? `<p>${fileLinks}</p>` : ''}
     ${admin ? `<button class="sm alt" onclick="deleteUpdate('${item.id}')">Delete</button>` : ''}</div>`;
 }
@@ -605,7 +760,7 @@ function updatesView(admin) {
   $('app').innerHTML = `${admin ? `<div class="card"><h2>Share with students</h2>
     <label for="ut">Title</label><input id="ut" maxlength="120">
     <label for="um">Announcement</label><textarea id="um" rows="4" maxlength="2000"></textarea>
-    <label for="ug">Send to</label><select id="ug"><option>All students</option>${(settings().groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select>
+    <label for="ug">Send to</label><select id="ug"><option value="All students">All students</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select>
     <label for="uf">Attach documents (optional; images, PDF, or Word documents, up to 10 MB each)</label><input id="uf" type="file" accept="image/*,.pdf,.doc,.docx" multiple>
     <button onclick="publishUpdate()">Publish</button><div class="msg err">${msg}</div></div>` : ''}
     <div class="card"><h2>${admin ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, admin)).join('') : '<p>No updates yet.</p>'}</div>`;
@@ -651,19 +806,40 @@ function reportName() {
   if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `PC-register-week-${ymd(m)}-to-${ymd(f)}`; }
   return `PC-register-month-${range.value.slice(0, 7)}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, r.group || '', pcLabel(r), r.time]);
-const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group', 'PC', 'Time'];
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
+const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at', 'Signature'];
 function exportXlsx() {
   const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
-  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:16},{wch:9},{wch:8}];
+  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:20},{wch:12},{wch:12},{wch:22},{wch:16}];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Register');
   XLSX.writeFile(wb, reportName() + '.xlsx');
 }
 function exportPdf() {
-  const doc = new jspdf.jsPDF();
+  const doc = new jspdf.jsPDF({ orientation: 'landscape' });
   doc.setFontSize(14); doc.text('PC Register: ' + reportName().replace('PC-register-', ''), 14, 16);
   doc.autoTable({ head: [HEAD], body: rows(), startY: 22, styles: { fontSize: 9 } });
   doc.save(reportName() + '.pdf');
+}
+function exportGroupPdf() {
+  if (!isAdmin()) return;
+  const group = $('groupExport').value, groupRows = inRange().filter(r => r.group === group);
+  const doc = new jspdf.jsPDF({ orientation: 'landscape' });
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text(groupLabel(group), 14, 15);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('PC-register-', ''), 14, 22);
+  doc.autoTable({
+    head: [['Date', 'Day', 'Student no.', 'Name', 'PC', 'Signed in', 'Returned at', 'Signature']],
+    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), '']),
+    startY: 28,
+    styles: { fontSize: 8, minCellHeight: 18 },
+    columnStyles: { 7: { cellWidth: 40 } },
+    didDrawCell(data) {
+      if (data.section !== 'body' || data.column.index !== 7) return;
+      const signature = groupRows[data.row.index].signature;
+      if (signature) doc.addImage(signature, 'PNG', data.cell.x + 1, data.cell.y + 2, 34, 13);
+    }
+  });
+  const filename = groupLabel(group).replace(/[^a-z0-9_-]+/gi, '-');
+  doc.save(`${filename}-${reportName()}.pdf`);
 }
 
 start();
