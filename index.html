@@ -81,11 +81,11 @@ async function hash(s) {
 
 /* ---------- Shared online data (Firebase Firestore) ---------- */
 let fs = null, storage = null;
-const C = { settings: { totalPCs: 41, admins: [], groups: [] }, users: [], records: [], reports: [], updates: [] };
+const C = { settings: { totalPCs: 41, admins: [], groups: [] }, users: [], records: [], reports: [], updates: [], zipReplies: [] };
 const WEEK = 7 * 864e5;
 const liveReports = () => C.reports.filter(x => Date.now() - x.created <= WEEK);
 const loaded = { s: 0, u: 0, r: 0, p: 0 };
-let updatesError = '';
+let updatesError = '', zipRepliesError = '', uploadBusy = false;
 const ready = () => loaded.s && loaded.u && loaded.r && loaded.p;
 const settings = () => C.settings, users = () => C.users, records = () => C.records;
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
@@ -122,11 +122,12 @@ function start() {
     loaded.p = 1; refresh();
   }, fail);
   fs.collection('updates').onSnapshot(q => { C.updates = q.docs.map(d => d.data()); updatesError = ''; refresh(); }, () => { updatesError = 'Updates are unavailable. Check Firestore rules.'; refresh(); });
+  fs.collection('zipReplies').onSnapshot(q => { C.zipReplies = q.docs.map(d => d.data()); zipRepliesError = ''; refresh(); }, () => { zipRepliesError = 'ZIP replies are unavailable. Check Firestore rules.'; refresh(); });
 }
 function refresh() {
   if (!ready()) return;
   const a = document.activeElement;
-  if (signatureActive || signatureDrawn || a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // preserve active form input and signature drawing
+  if (uploadBusy || signatureActive || signatureDrawn || a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return; // preserve active form input, signature drawing, and uploads
   render();
 }
 
@@ -737,9 +738,25 @@ function adminReports() {
 
 /* ---------- Announcements and group documents ---------- */
 const MAX_UPLOAD = 10 * 1024 * 1024;
+const MAX_ZIP_UPLOAD = 300 * 1024 * 1024;
+async function isZipUpload(file) {
+  if (!file || file.size > MAX_ZIP_UPLOAD || !file.name.toLowerCase().endsWith('.zip')) return false;
+  const bytes = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  return bytes.length === 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && [0x03, 0x05, 0x07].includes(bytes[2]) && [0x04, 0x06, 0x08].includes(bytes[3]);
+}
+async function uploadZipFile(path, file, onProgress) {
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const ref = storage.ref(`${path}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`);
+  const task = ref.put(file);
+  await new Promise((resolve, reject) => task.on('state_changed', snap => onProgress(snap.bytesTransferred, snap.totalBytes), reject, resolve));
+  return { name: file.name, type: 'application/zip', path: ref.fullPath, url: await ref.getDownloadURL(), size: file.size };
+}
 function validUpload(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   return file.size <= MAX_UPLOAD && (file.type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'heif', 'pdf', 'doc', 'docx'].includes(ext));
+}
+async function validUpdateFile(file) {
+  return file.name.toLowerCase().endsWith('.zip') ? isZipUpload(file) : validUpload(file);
 }
 async function uploadFile(path, file) {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -748,39 +765,85 @@ async function uploadFile(path, file) {
   return { name: file.name, type: file.type || '', path: ref.fullPath, url: await ref.getDownloadURL() };
 }
 function updateCard(item, admin) {
-  const fileLinks = (item.files || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join('<br>');
+  const fileLinks = (item.files || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>${f.size ? ` (${(f.size / 1048576).toFixed(1)} MB)` : ''}`).join('<br>');
   return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(item.group ? groupLabel(item.group) : 'All students')} · ${new Date(item.created).toLocaleString()}</small>
     ${item.message ? `<p>${esc(item.message).replace(/\n/g, '<br>')}</p>` : ''}${fileLinks ? `<p>${fileLinks}</p>` : ''}
     ${admin ? `<button class="sm alt" onclick="deleteUpdate('${item.id}')">Delete</button>` : ''}</div>`;
 }
+function zipReplyCard(reply) {
+  const groupText = reply.studentType ? `Student type: ${reply.studentType}` : reply.group ? groupLabel(reply.group, reply.groupYear) : 'No group assigned';
+  return `<div class="rep"><b>${esc(reply.name)}</b> (${esc(reply.sn)}) · ${esc(groupText)}<br>
+    <a href="${esc(reply.file.url)}" target="_blank" rel="noopener">${esc(reply.file.name)}</a> (${(reply.file.size / 1048576).toFixed(1)} MB)<br>
+    <small>Received ${new Date(reply.created).toLocaleString()}</small><br><button class="sm alt" onclick="deleteZipReply('${reply.id}')">Delete</button></div>`;
+}
 function updatesView(admin) {
   const group = assignedGroup();
+  const replies = C.zipReplies.slice().sort((a, b) => b.created - a.created);
   const visible = C.updates.filter(x => admin || !x.group || x.group === 'All students' || x.group === group)
     .sort((a, b) => b.created - a.created);
   $('app').innerHTML = `${admin ? `<div class="card"><h2>Share with students</h2>
     <label for="ut">Title</label><input id="ut" maxlength="120">
     <label for="um">Announcement</label><textarea id="um" rows="4" maxlength="2000"></textarea>
-    <label for="ug">Send to</label><select id="ug"><option value="All students">All students</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select>
-    <label for="uf">Attach documents (optional; images, PDF, or Word documents, up to 10 MB each)</label><input id="uf" type="file" accept="image/*,.pdf,.doc,.docx" multiple>
-    <button onclick="publishUpdate()">Publish</button><div class="msg err">${msg}</div></div>` : ''}
+    <label for="ug">Send to</label><select id="ug"><option value="All students">All students (every group)</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select>
+    <label for="uf">Attach files (images/documents up to 10 MB each, or ZIP up to 300 MB)</label><input id="uf" type="file" accept="image/*,.pdf,.doc,.docx,.zip,application/zip,application/x-zip-compressed" multiple>
+    <button id="publishUpdateBtn" onclick="publishUpdate()">Publish</button><div id="uploadStatus" class="msg"></div><div class="msg err">${msg}</div></div>` : `<div class="card"><h2>Send a ZIP to the admin</h2>
+    <p>Send one ZIP file, up to 300 MB. The admin will see your name and group or student type.</p>
+    <label for="studentZip">ZIP file</label><input id="studentZip" type="file" accept=".zip,application/zip,application/x-zip-compressed">
+    <button id="sendZipBtn" onclick="sendZipReply()">Send ZIP</button><div id="uploadStatus" class="msg"></div><div class="msg err">${msg}</div></div>`}
     <div class="card"><h2>${admin ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, admin)).join('') : '<p>No updates yet.</p>'}</div>`;
+  if (admin) $('app').insertAdjacentHTML('beforeend', `<div class="card"><h2>ZIP files from students</h2>${zipRepliesError ? `<p class="err">${esc(zipRepliesError)}</p>` : ''}${replies.length ? replies.map(zipReplyCard).join('') : '<p>No ZIP files received.</p>'}</div>`);
 }
 async function publishUpdate() {
-  if (!isAdmin()) return;
+  if (!isAdmin() || uploadBusy) return;
   const title = $('ut').value.trim(), message = $('um').value.trim(), group = $('ug').value, filesToUpload = [...$('uf').files];
   if (!title) return say('Add a title.');
   if (!message && !filesToUpload.length) return say('Add an announcement or attach a document.');
-  if (filesToUpload.some(file => !validUpload(file))) return say('Choose images, PDFs, or Word documents no larger than 10 MB each.');
+  if (!(await Promise.all(filesToUpload.map(validUpdateFile))).every(Boolean)) return say('Choose valid images/documents up to 10 MB or ZIP files up to 300 MB.');
   const id = `update_${Date.now()}`;
   const files = [];
+  uploadBusy = true;
+  $('publishUpdateBtn').disabled = true;
+  const status = $('uploadStatus');
   try {
-    for (const file of filesToUpload) files.push(await uploadFile(`updates/${id}`, file));
+    for (const file of filesToUpload) {
+      if (file.name.toLowerCase().endsWith('.zip')) {
+        files.push(await uploadZipFile(`updates/${id}`, file, (sent, total) => { status.textContent = `Uploading ${file.name}: ${Math.round(sent * 100 / total)}%`; }));
+      } else files.push(await uploadFile(`updates/${id}`, file));
+    }
     await fs.collection('updates').doc(id).set({ id, title, message, group, files, created: Date.now(), createdBy: session.user });
     msg = ''; render();
   } catch (e) {
     await Promise.all(files.map(f => storage.ref(f.path).delete().catch(() => {})));
     say('Could not publish. Check Firebase Storage is enabled and try again.');
-  }
+  } finally { uploadBusy = false; }
+}
+async function sendZipReply() {
+  if (!session || session.role !== 'student' || uploadBusy) return;
+  const file = $('studentZip').files[0], status = $('uploadStatus');
+  if (!file) return say('Choose a ZIP file first.');
+  if (!(await isZipUpload(file))) return say('Choose a valid ZIP file no larger than 300 MB.');
+  const profile = studentProfile(), id = `${session.sn}_${Date.now()}`;
+  let uploaded = null;
+  uploadBusy = true;
+  $('sendZipBtn').disabled = true;
+  try {
+    uploaded = await uploadZipFile(`zipReplies/${id}`, file, (sent, total) => { status.textContent = `Uploading ${file.name}: ${Math.round(sent * 100 / total)}%`; });
+    const reply = { id, sn: session.sn, name: session.name, group: isLegacyPersonalGroup(profile.group) ? '' : (profile.group || ''), groupYear: groupYearFor(profile.group), studentType: profile.studentType || '', personalPCProgram: Boolean(profile.personalPCProgram || isLegacyPersonalGroup(profile.group)), file: uploaded, created: Date.now() };
+    await fs.collection('zipReplies').doc(id).set(reply);
+    msg = ''; render();
+  } catch (e) {
+    if (uploaded) await storage.ref(uploaded.path).delete().catch(() => {});
+    say('Could not send the ZIP. Check Firebase Storage and Firestore rules, then try again.');
+  } finally { uploadBusy = false; }
+}
+async function deleteZipReply(id) {
+  if (!isAdmin() || !confirm('Delete this student ZIP and its stored file?')) return;
+  const reply = C.zipReplies.find(x => x.id === id);
+  try {
+    await fs.collection('zipReplies').doc(id).delete();
+    if (reply && reply.file && reply.file.path) await storage.ref(reply.file.path).delete().catch(() => {});
+  } catch (e) { say('Could not delete the ZIP reply.'); }
+  render();
 }
 async function deleteUpdate(id) {
   if (!isAdmin() || !confirm('Delete this update?')) return;
