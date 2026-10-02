@@ -47,6 +47,15 @@ function dedupeAttendance(list) {
 const hasRecordedPc = pc => pc !== null && pc !== undefined && String(pc).trim() !== '' && !['null', 'undefined'].includes(String(pc).trim().toLowerCase());
 const settings = () => C.settings, users = () => C.users, records = () => dedupeAttendance(C.records);
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
+const PERMISSIONS = { attendance: 'Manage attendance', students: 'Manage student accounts', groups: 'Manage groups', settings: 'Change lab and PC settings', reports: 'Review absence reports', updates: 'Publish updates and manage student files', staff: 'Create and manage staff roles' };
+const isStaff = () => Boolean(session && ['admin', 'staff'].includes(session.role) && settings().admins.some(a => a.user === session.user));
+const hasPermission = permission => {
+  if (!isStaff()) return false;
+  const account = settings().admins.find(a => a.user === session.user);
+  if (!account) return false;
+  if (session.role === 'admin') return account.role !== 'staff';
+  return account.role === 'staff' && Array.isArray(account.permissions) && account.permissions.includes(permission);
+};
 const saveSettings = st => fs.doc('settings/main').set(st);
 let session = null;
 try { session = JSON.parse(localStorage.getItem('pcreg_session')); } catch {}
@@ -92,18 +101,22 @@ function refresh() {
 /* ---------- Views ---------- */
 function render() {
   if (!ready()) return;
+  if (session && ['admin', 'staff'].includes(session.role) && !settings().admins.some(a => a.user === session.user)) {
+    logout();
+    return;
+  }
   $('who').innerHTML = session
     ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
   $('nav').innerHTML = '';
   if (!session) return authView();
   if (session.role === 'student' && !studentProfile().signature) return signatureSetupView();
-  const adm = session.role === 'admin', n = liveReports().filter(r => r.status === 'pending').length;
-  $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${adm ? 'Admin' : 'Register'}</a>` +
-    `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${adm ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>` +
+  const staff = isStaff(), n = liveReports().filter(r => r.status === 'pending').length;
+  $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${staff ? 'Admin' : 'Register'}</a>` +
+    (!staff || hasPermission('reports') ? `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${staff ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>` : '') +
     `<a href="#updates" class="${page() === 'updates' ? 'on' : ''}">Updates</a>`;
-  if (page() === 'updates') return updatesView(adm);
-  if (page() === 'reports') return adm ? adminReports() : studentReports();
-  adm ? adminView() : studentView();
+  if (page() === 'updates') return updatesView(staff);
+  if (page() === 'reports') return staff ? (hasPermission('reports') ? adminReports() : adminView()) : studentReports();
+  staff ? adminView() : studentView();
 }
 const page = () => location.hash === '#reports' ? 'reports' : location.hash === '#updates' ? 'updates' : 'register';
 window.addEventListener('hashchange', () => { msg = ''; render(); });
@@ -199,7 +212,7 @@ async function login() {
   const raw = $('s').value.trim(), p = $('p').value, ad = findAdmin(raw);
   if (ad) {
     if (ad.pw !== await hash(ad.user + ':' + p)) return say('Wrong admin password.');
-    session = { role: 'admin', name: ad.user, user: ad.user };
+    session = { role: ad.role === 'staff' ? 'staff' : 'admin', name: ad.user, user: ad.user };
   } else {
     const sn = raw.toUpperCase(), u = users().find(x => x.sn === sn);
     if (!u || u.pw !== await hash(sn + ':' + p)) return say('Wrong username or password.');
@@ -213,7 +226,7 @@ async function setupAdmin() {
   if (!user) return say('Type an admin username.');
   if (users().some(x => x.sn.toLowerCase() === user)) return say('That name is used by a student. Choose another.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
-  await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p) }] });
+  await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p), role: 'admin' }] });
   session = { role: 'admin', name: user, user }; keepSession(); msg = ''; render();
 }
 function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; myGroup = ''; myStudentType = ''; signatureMessage = ''; render(); }
@@ -328,6 +341,7 @@ async function sign() {
 
 /* ---------- Admin ---------- */
 let range = { type: 'week', value: ymd(new Date()) };
+let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '';
 function inRange() {
   let list = records();
   if (range.type === 'week') {
@@ -373,6 +387,61 @@ function clearAttendanceFilters() {
   attendanceFilters = { query: '', from: '', to: '', group: '', type: '', pc: '', status: '' };
   render();
 }
+function viewRecord(id) {
+  selectedRecordId = id;
+  render();
+  $('recordDetails')?.scrollIntoView({ block: 'nearest' });
+}
+function viewStudent(sn) {
+  selectedStudentSn = sn;
+  render();
+  $('studentDetails')?.scrollIntoView({ block: 'nearest' });
+}
+function viewGroup(group) {
+  selectedGroup = group;
+  render();
+  $('groupDetails')?.scrollIntoView({ block: 'nearest' });
+}
+function adminGroupDetails() {
+  const groups = settings().groups || [], i = groups.indexOf(selectedGroup);
+  if (i < 0 || isLegacyPersonalGroup(selectedGroup)) return '';
+  const members = users().filter(u => u.group === selectedGroup);
+  const history = hasPermission('attendance') ? records().filter(r => r.group === selectedGroup)
+    .sort((a, b) => b.date.localeCompare(a.date) || (Number(b.signedAt) || 0) - (Number(a.signedAt) || 0))
+    : [];
+  return `<div class="card" id="groupDetails"><h2>${esc(groupLabel(selectedGroup))}</h2>
+    <p>${members.length} student(s)${hasPermission('attendance') ? ` · ${history.length} attendance record(s)` : ''}</p>
+    <div class="row"><div><label for="groupYearDetail">Year</label><input id="groupYearDetail" maxlength="24" value="${esc(groupYearFor(selectedGroup))}" onchange="setGroupYear(${i}, this.value)"></div>
+    <div><label for="groupWhatsAppDetail">WhatsApp invite link</label><input id="groupWhatsAppDetail" type="url" placeholder="https://chat.whatsapp.com/..." value="${esc(groupWhatsAppUrl(selectedGroup))}" onchange="setGroupWhatsAppLink(${i}, this.value)"></div></div>
+    <h3>Students</h3>${members.length ? `<ul>${members.map(u => `<li>${hasPermission('students') ? `<a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a>` : `${esc(u.name)} (${esc(u.sn)})`}</li>`).join('')}</ul>` : '<p>No students are assigned to this group.</p>'}
+    ${hasPermission('attendance') ? `<h3>Attendance history</h3>${table(history, true)}` : ''}
+    <button class="sm alt" onclick="removeGroup(${i})">Remove group</button>
+    <button class="sm alt" onclick="selectedGroup = ''; render()">Close details</button></div>`;
+}
+function adminRecordDetails() {
+  const rec = records().find(r => r.id === selectedRecordId);
+  if (!rec) return '';
+  return `<div class="card" id="recordDetails"><h2>Sign-in details</h2>
+    <p><b>${esc(rec.name)}</b> (${esc(rec.sn)})</p>
+    <p>${rec.date} (${dayName(rec.date)}) · ${esc(attendanceCategory(rec))} · ${pcLabel(rec)}</p>
+    <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? esc(new Date(rec.returnedAt).toLocaleString()) : isP(rec) ? 'Personal PC' : 'Not returned'}</p>
+    <p>Signature: ${rec.signature ? `<img src="${esc(rec.signature)}" alt="Signature of ${esc(rec.name)}" style="width:180px;height:64px;object-fit:contain">` : 'Not captured'}</p>
+    ${isP(rec) ? '' : `<button class="sm" onclick="returnPc('${esc(rec.id)}')">Record return</button><button class="sm" onclick="editPc('${esc(rec.id)}')">Change PC</button>`}
+    <button class="sm alt" onclick="removeRec('${esc(rec.id)}')">Remove sign-in</button>
+    <button class="sm alt" onclick="selectedRecordId = ''; render()">Close details</button></div>`;
+}
+function adminStudentDetails() {
+  const studentList = users(), user = studentList.find(u => u.sn === selectedStudentSn);
+  if (!user) return '';
+  const i = studentList.indexOf(user);
+  return `<div class="card" id="studentDetails"><h3>${esc(user.name)}</h3>
+    <p>Student number: ${esc(user.sn)}<br>Group: ${esc(user.group ? groupLabel(user.group) : 'None')}<br>Student type: ${esc(user.studentType || 'None')}</p>
+    <div class="row"><div><label for="studentGroup">Group</label><select id="studentGroup" onchange="assignGroup(${i}, this.value)"><option value="" ${(!user.group || isLegacyPersonalGroup(user.group)) ? 'selected' : ''}>${isLegacyPersonalGroup(user.group) ? 'Lab Personal PC (choose type)' : '(none)'}</option>${groupOpts(user.group)}</select></div>
+    <div><label for="studentType">Student type</label><select id="studentType" onchange="assignStudentType(${i}, this.value)"><option value="">(none)</option>${studentTypes().map(type => `<option value="${esc(type)}" ${user.studentType === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></div></div>
+    <button class="sm" onclick="resetStudent(${i})">Reset password</button>
+    <button class="sm alt" onclick="deleteStudent('${esc(user.sn)}')">Delete login and profile</button>
+    <button class="sm alt" onclick="selectedStudentSn = ''; render()">Close details</button></div>`;
+}
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
@@ -380,9 +449,8 @@ function adminView() {
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
-  ${dayCard()}
-  ${attendanceSearchCard()}
-  <div class="card"><h2>Settings</h2>
+  ${hasPermission('attendance') ? `${dayCard()}${attendanceSearchCard()}${adminRecordDetails()}` : ''}
+  ${hasPermission('settings') ? `<div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
   <div class="card"><h2>Lab location</h2>
@@ -390,23 +458,24 @@ function adminView() {
     <p>Stand in the lab with this device and click the button. A phone with GPS is more exact than a desktop PC.</p>
     <div class="row"><div><label for="rad">Allowed distance in metres</label><input id="rad" type="number" min="20" value="${st.lab ? st.lab.radius : 100}"></div></div>
     <button onclick="setLab()">Use this device's location as the lab</button>
-    ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>
-  <div class="card"><h2>Groups</h2>
-    ${groups.length ? `<div class="wrap"><table>${groups.map(g => { const i = st.groups.indexOf(g); return `<tr><td>${esc(groupLabel(g))} (${users().filter(u => u.group === g).length} students)</td><td><label>Year <input aria-label="Year for ${esc(g)}" maxlength="24" value="${esc(groupYearFor(g))}" onchange="setGroupYear(${i}, this.value)"></label></td><td><label>WhatsApp invite link <input type="url" aria-label="WhatsApp invite link for ${esc(g)}" placeholder="https://chat.whatsapp.com/..." value="${esc(groupWhatsAppUrl(g))}" onchange="setGroupWhatsAppLink(${i}, this.value)"></label></td><td><button class="sm alt" onclick="removeGroup(${i})">Remove</button></td></tr>`; }).join('')}</table></div>` : '<p class="err">No groups yet. Students cannot sign until you add one.</p>'}
+    ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>` : ''}
+  ${hasPermission('groups') ? `<div class="card"><h2>Groups</h2>
+    ${groups.length ? `<ul class="link-list">${groups.map(g => `<li><a href="#groupDetails" onclick="viewGroup(this.dataset.group); return false" data-group="${esc(g)}">${esc(groupLabel(g))}</a><span>${users().filter(u => u.group === g).length} students</span></li>`).join('')}</ul>` : '<p class="err">No groups yet. Students cannot sign until you add one.</p>'}
     ${(st.groups || []).some(isLegacyPersonalGroup) ? `<p>“${LEGACY_PERSONAL_GROUP}” is treated as a student type category, not a group.</p><button class="sm alt" onclick="removeLegacyPersonalGroup()">Remove legacy group entry</button>` : ''}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
+  ${adminGroupDetails()}
   <div class="card"><h2>Student types</h2><p>For students formerly listed under ${LEGACY_PERSONAL_GROUP}; these are separate from groups.</p>
     <div class="wrap"><table>${studentTypes().map((type, i) => `<tr><td>${esc(type)}</td><td>${users().filter(u => u.studentType === type).length} students</td><td><button class="sm alt" onclick="removeStudentType(${i})">Remove</button></td></tr>`).join('')}</table></div>
     <label for="newStudentType">New student type</label><input id="newStudentType" maxlength="50">
-    <button onclick="addStudentType()">Add student type</button></div>
-  <div class="card"><h2>Personal PC numbers</h2>
+    <button onclick="addStudentType()">Add student type</button></div>` : ''}
+  ${hasPermission('settings') ? `<div class="card"><h2>Personal PC numbers</h2>
     <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
     ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
     <div class="row"><div><label for="pnc">How many numbers to add</label><input id="pnc" type="number" min="1" max="50" value="5"></div>
     <div><label for="pnn">Or one exact number (200 or more)</label><input id="pnn" type="number" min="200"></div></div>
-    <button onclick="addPersonalNums()">Add numbers</button></div>
-  <div class="card"><h2>Personal PC</h2>
+    <button onclick="addPersonalNums()">Add numbers</button></div>` : ''}
+  ${hasPermission('attendance') ? `<div class="card"><h2>Personal PC</h2>
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
@@ -414,22 +483,21 @@ function adminView() {
     <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
     <button onclick="markPersonal()">Mark as personal PC</button>
     <h2 style="margin-top:20px">Using a personal PC this week</h2>
-    ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group</th><th>PC</th><th></th></tr>${personal.map(r =>
-      `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td><button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>
-  <div class="card"><h2>Admins (up to 2)</h2>
-    <p>${st.admins.map(a => esc(a.user)).join(' and ')}</p>
-    ${st.admins.length < 2 ? `<div class="row"><div><label for="au">Second admin username</label><input id="au" autocapitalize="off"></div>
-    <div><label for="ap">Password (at least 6 characters)</label><input id="ap" type="password"></div></div>
-    <button onclick="addAdmin()">Add second admin</button>` : '<p>Both admin places are used.</p>'}</div>
-  <div class="card"><h2>Change my admin password</h2>
+    ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>PC</th><th></th></tr>${personal.map(r =>
+      `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${pcLabel(r)}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>` : ''}
+  ${hasPermission('staff') ? `<div class="card"><h2>Staff roles</h2>
+    <ul class="link-list">${st.admins.map(a => `<li data-user="${esc(a.user)}"><span><b>${esc(a.user)}</b> · ${a.role === 'staff' ? 'Staff' : 'Full admin'}</span><span>${a.role === 'staff' ? (a.permissions || []).map(key => esc(PERMISSIONS[key] || key)).join(', ') || 'No rights granted' : 'All rights'}${a.role === 'staff' && a.user !== session.user ? `<details><summary>Edit rights</summary>${Object.entries(PERMISSIONS).map(([key, label]) => `<label class="check"><input type="checkbox" name="editStaffPermission" value="${key}" ${(a.permissions || []).includes(key) ? 'checked' : ''}>${label}</label>`).join('')}<button class="sm" onclick="saveStaffPermissions(this)">Save rights</button></details><button class="sm alt" onclick="removeStaff('${esc(a.user)}')">Remove</button>` : ''}</span></li>`).join('')}</ul>
+    <div class="row"><div><label for="staffUser">Username</label><input id="staffUser" autocapitalize="off"></div><div><label for="staffPassword">Temporary password (at least 6 characters)</label><input id="staffPassword" type="password"></div></div>
+    <fieldset><legend>Granted rights</legend>${Object.entries(PERMISSIONS).filter(([key]) => key !== 'staff' || hasPermission('staff')).map(([key, label]) => `<label class="check"><input type="checkbox" name="staffPermission" value="${key}">${label}</label>`).join('')}</fieldset>
+    <button onclick="addAdmin()">Add staff account</button></div>` : ''}
+  <div class="card"><h2>Change my password</h2>
     <div class="row"><div><label for="np">New password (at least 6 characters)</label><input id="np" type="password"></div>
     <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
-    <button onclick="changeAdminPw()">Change admin password</button></div>
-  <div class="card"><h2>Students</h2>
+    <button onclick="changeAdminPw()">Change password</button></div>
+  ${hasPermission('students') ? `<div class="card"><h2>Students</h2>
     <p>Assign regular groups or, for Lab Personal PC students, a separate student type.</p>
-    ${users().length ? `<div class="wrap"><table><tr><th>Student no.</th><th>Name</th><th>Group</th><th>Student type</th><th></th></tr>${users().map((u, i) =>
-      `<tr><td>${esc(u.sn)}</td><td>${esc(u.name)}</td><td><select style="min-width:130px" aria-label="Group for ${esc(u.name)}" onchange="assignGroup(${i}, this.value)"><option value="" ${(isLegacyPersonalGroup(u.group) || !u.group) ? 'selected' : ''}>${isLegacyPersonalGroup(u.group) ? 'Lab Personal PC (choose type)' : '(none)'}</option>${groupOpts(u.group)}</select></td><td><select style="min-width:170px" aria-label="Student type for ${esc(u.name)}" onchange="assignStudentType(${i}, this.value)"><option value="">(none)</option>${studentTypes().map(type => `<option value="${esc(type)}" ${u.studentType === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></td><td><button class="sm" onclick="resetStudent(${i})">Reset password</button></td></tr>`).join('')}</table></div>` : '<p>No students have signed up yet.</p>'}</div>
-  <div class="card"><h2>Reports</h2>
+    ${users().length ? `<ul>${users().map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students have signed up yet.</p>'}</div>` : ''}
+  ${hasPermission('attendance') ? `<div class="card"><h2>Reports</h2>
     <div class="row">
       <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
         <option value="week" ${range.type === 'week' ? 'selected' : ''}>Week (Mon to Fri)</option>
@@ -441,7 +509,7 @@ function adminView() {
     <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p>
     <h3>Group attendance register</h3>
     <div class="row"><div><label for="groupExport">Group</label><select id="groupExport">${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div></div>
-    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div>`;
+    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div>` : ''}`;
 }
 let dayView = { date: ymd(new Date()), mode: 'group' };
 function dayCard() {
@@ -470,9 +538,9 @@ function setRange() {
   range.value = v ? (v.length === 7 ? v + '-01' : v) : ymd(new Date());
   render();
 }
-const isAdmin = () => session && session.role === 'admin';
+const isAdmin = () => isStaff();
 function saveTotal() {
-  if (!isAdmin()) return;
+  if (!hasPermission('settings')) return;
   const n = parseInt($('tp').value, 10), maxUsed = Math.max(0, ...records().filter(r => !isP(r)).map(r => +r.pc || 0));
   if (!n || n < 1) return say('Enter a valid number.');
   if (n >= 200) return say('Lab PCs must be under 200. Numbers from 200 are for personal PCs.');
@@ -480,7 +548,7 @@ function saveTotal() {
   saveSettings({ ...settings(), totalPCs: n }).then(() => say('Saved.', true), () => say('Could not save.'));
 }
 async function setLab() {
-  if (!isAdmin()) return;
+  if (!hasPermission('settings')) return;
   const radius = parseInt($('rad').value, 10);
   if (!radius || radius < 20) return say('Distance must be at least 20 metres.');
   try {
@@ -490,7 +558,7 @@ async function setLab() {
   } catch (e) { say(e.code ? geoMsg(e) : 'Could not save.'); }
 }
 function saveRadius() {
-  if (!isAdmin() || !settings().lab) return;
+  if (!hasPermission('settings') || !settings().lab) return;
   const radius = parseInt($('rad').value, 10);
   if (!radius || radius < 20) return say('Distance must be at least 20 metres.');
   saveSettings({ ...settings(), lab: { ...settings().lab, radius } }).then(() => say('Distance saved.', true), () => say('Could not save.'));
@@ -500,20 +568,20 @@ const groupOpts = cur => {
   return all.map(x => `<option value="${esc(x)}" ${x === cur ? 'selected' : ''}>${esc(groupLabel(x))}</option>`).join('');
 };
 function assignGroup(i, group) {
-  if (!isAdmin()) return;
+  if (!hasPermission('students')) return;
   const u = users()[i];
   const personalPCProgram = !group && Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group));
   fs.collection('users').doc(u.sn).update({ group, groupLocked: true, personalPCProgram, studentType: group ? '' : (u.studentType || '') }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
 }
 function assignStudentType(i, type) {
-  if (!isAdmin()) return;
+  if (!hasPermission('students')) return;
   const u = users()[i], personalPCProgram = Boolean(type || u.personalPCProgram || isLegacyPersonalGroup(u.group));
   const group = personalPCProgram ? '' : (u.group || '');
   fs.collection('users').doc(u.sn).update({ group, studentType: type, personalPCProgram, groupLocked: true })
     .then(() => say(type ? `${esc(u.name)} is now classified as ${esc(type)}.` : `${esc(u.name)} student type cleared.`, true), () => say('Could not save.'));
 }
 function setGroupYear(i, year) {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const group = settings().groups[i], value = year.trim();
   if (value.length > 24) return say('Group year must be 24 characters or fewer.');
   const groupYears = { ...(settings().groupYears || {}) };
@@ -521,7 +589,7 @@ function setGroupYear(i, year) {
   saveSettings({ ...settings(), groupYears }).then(() => say(`Updated ${esc(groupLabel(group))}.`, true), () => say('Could not save group year.'));
 }
 function setGroupWhatsAppLink(i, value) {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const group = settings().groups[i], link = value.trim(), groupWhatsAppLinks = { ...(settings().groupWhatsAppLinks || {}) };
   if (link) {
     let parsed;
@@ -532,7 +600,7 @@ function setGroupWhatsAppLink(i, value) {
   saveSettings({ ...settings(), groupWhatsAppLinks }).then(() => say(link ? `WhatsApp link saved for ${esc(groupLabel(group))}.` : `WhatsApp link cleared for ${esc(groupLabel(group))}.`, true), () => say('Could not save WhatsApp link.'));
 }
 function addPersonalNums() {
-  if (!isAdmin()) return;
+  if (!hasPermission('settings')) return;
   const cur = personalNums(), one = parseInt($('pnn').value, 10), cnt = parseInt($('pnc').value, 10);
   let add = [];
   if ($('pnn').value) {
@@ -547,11 +615,11 @@ function addPersonalNums() {
   saveSettings({ ...settings(), personalPCs: [...cur, ...add] }).then(() => say(`Added: ${add.join(', ')}.`, true), () => say('Could not save.'));
 }
 function removePersonalNum(n) {
-  if (!isAdmin() || !confirm(`Remove personal number ${n}? Old sign-ins keep it.`)) return;
+  if (!hasPermission('settings') || !confirm(`Remove personal number ${n}? Old sign-ins keep it.`)) return;
   saveSettings({ ...settings(), personalPCs: personalNums().filter(x => x !== n) }).then(() => render());
 }
 function addGroup() {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const g = $('gn').value.trim(), gr = settings().groups || [];
   if (!g) return say('Type a group name.');
   if (isLegacyPersonalGroup(g)) return say('Lab Personal PC is a student type category, not a group.');
@@ -559,7 +627,7 @@ function addGroup() {
   saveSettings({ ...settings(), groups: [...gr, g] }).then(() => say('Group added.', true), () => say('Could not save.'));
 }
 function removeGroup(i) {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const gr = [...(settings().groups || [])];
   if (!confirm(`Remove group ${gr[i]}? Students and old sign-ins keep this name.`)) return;
   const groupYears = { ...(settings().groupYears || {}) };
@@ -569,7 +637,7 @@ function removeGroup(i) {
   gr.splice(i, 1); saveSettings({ ...settings(), groups: gr, groupYears, groupWhatsAppLinks }).then(() => render());
 }
 function removeLegacyPersonalGroup() {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const gr = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
   const groupYears = { ...(settings().groupYears || {}) }, groupWhatsAppLinks = { ...(settings().groupWhatsAppLinks || {}) };
   Object.keys(groupYears).filter(isLegacyPersonalGroup).forEach(g => delete groupYears[g]);
@@ -577,14 +645,14 @@ function removeLegacyPersonalGroup() {
   saveSettings({ ...settings(), groups: gr, groupYears, groupWhatsAppLinks }).then(() => say('Lab Personal PC removed from the group list. Existing students will choose a student type.', true), () => say('Could not update groups.'));
 }
 function addStudentType() {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const type = $('newStudentType').value.trim(), types = studentTypes();
   if (!type) return say('Type a student type.');
   if (types.some(x => x.toLowerCase() === type.toLowerCase())) return say('That student type already exists.');
   saveSettings({ ...settings(), studentTypes: [...types, type] }).then(() => say('Student type added.', true), () => say('Could not save student type.'));
 }
 function removeStudentType(i) {
-  if (!isAdmin()) return;
+  if (!hasPermission('groups')) return;
   const type = studentTypes()[i];
   if (!type) return;
   if (studentTypes().length < 2) return say('Keep at least one student type.');
@@ -592,7 +660,7 @@ function removeStudentType(i) {
   saveSettings({ ...settings(), studentTypes: studentTypes().filter((_, index) => index !== i) }).then(() => say('Student type removed.', true), () => say('Could not remove student type.'));
 }
 async function markPersonal() {
-  if (!isAdmin()) return;
+  if (!hasPermission('attendance')) return;
   const sn = $('pp').value, date = $('pd').value, u = users().find(x => x.sn === sn);
   if (!u) return say('Choose a student.');
   const personalPCProgram = Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group)), group = personalPCProgram ? '' : $('pg').value || u.group || '', studentType = personalPCProgram ? u.studentType || '' : '';
@@ -616,16 +684,17 @@ async function markPersonal() {
   } catch (e) { say(e.message === 'taken' ? `Personal PC ${num} is already taken on that day.` : 'Could not save.'); }
 }
 async function addAdmin() {
-  if (!isAdmin()) return;
-  const st = settings(), user = $('au').value.trim().toLowerCase(), p = $('ap').value;
-  if (st.admins.length >= 2) return say('There are already 2 admins.');
-  if (!user) return say('Type a username for the second admin.');
+  if (!hasPermission('staff')) return;
+  const st = settings();
+  const user = $('staffUser').value.trim().toLowerCase(), p = $('staffPassword').value;
+  const permissions = [...document.querySelectorAll('input[name="staffPermission"]:checked')].map(input => input.value);
+  if (!user) return say('Type a username for the staff account.');
   if (findAdmin(user) || users().some(x => x.sn.toLowerCase() === user)) return say('That username is already used.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
-  await saveSettings({ ...st, admins: [...st.admins, { user, pw: await hash(user + ':' + p) }] }); say('Second admin added.', true);
+  await saveSettings({ ...st, admins: [...st.admins, { user, pw: await hash(user + ':' + p), role: 'staff', permissions }] }); say('Staff account added.', true);
 }
 async function changeAdminPw() {
-  if (!isAdmin()) return;
+  if (!isStaff()) return;
   const a = $('np').value, b = $('np2').value, st = settings();
   if (a.length < 6) return say('Password must have at least 6 characters.');
   if (a !== b) return say('The two passwords do not match.');
@@ -634,21 +703,50 @@ async function changeAdminPw() {
   await saveSettings({ ...st, admins }); say('Admin password changed.', true);
 }
 async function resetStudent(i) {
-  if (!isAdmin()) return;
+  if (!hasPermission('students')) return;
   const x = users()[i];
   const v = prompt(`Type a new password for ${x.name} (${x.sn}), at least 6 characters. Then give it to the student:`);
   if (v === null) return;
   if (v.length < 6) return say('Password must have at least 6 characters.');
   await fs.collection('users').doc(x.sn).update({ pw: await hash(x.sn + ':' + v) }); say(`Password reset for ${esc(x.name)}.`, true);
 }
+async function deleteStudent(sn) {
+  if (!hasPermission('students')) return;
+  const student = users().find(u => u.sn === sn);
+  if (!student || !confirm(`Delete ${student.name} (${student.sn})'s login and profile? Historical attendance records will be kept.`)) return;
+  try {
+    await fs.collection('users').doc(sn).delete();
+    C.users = users().filter(u => u.sn !== sn);
+    selectedStudentSn = '';
+    say(`${esc(student.name)}'s login and profile were deleted. Attendance history was kept.`, true);
+  } catch (e) { say('Could not delete the student profile.'); }
+}
+async function removeStaff(user) {
+  if (!hasPermission('staff')) return;
+  const target = settings().admins.find(a => a.user === user);
+  if (!target || target.role !== 'staff' || user === session.user || !confirm(`Remove staff account ${user}?`)) return;
+  await saveSettings({ ...settings(), admins: settings().admins.filter(a => a.user !== user) });
+  say('Staff account removed.', true);
+}
+async function saveStaffPermissions(button) {
+  if (!hasPermission('staff')) return;
+  const item = button.closest('li'), user = item && item.dataset.user;
+  if (!user || user === session.user) return;
+  const permissions = [...item.querySelectorAll('input[name="editStaffPermission"]:checked')].map(input => input.value);
+  const admins = settings().admins.map(account => account.user === user && account.role === 'staff' ? { ...account, permissions } : account);
+  await saveSettings({ ...settings(), admins });
+  say(`Updated rights for ${esc(user)}.`, true);
+}
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
+  if (admin) return `<table><tr><th>Date</th><th>Student</th><th>Group / type</th><th>PC</th><th>Status</th><th></th></tr>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? 'Returned' : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
     list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? new Date(r.returnedAt).toLocaleString() : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
       (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function returnPc(id) {
-  if (!isAdmin()) return;
+  if (!hasPermission('attendance')) return;
   const rec = records().find(x => x.id === id);
   if (!rec || rec.returnedAt || isP(rec) || !confirm(`Record that ${rec.name} returned PC ${rec.pc}?`)) return;
   const returnedAt = Date.now(), recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`);
@@ -663,7 +761,7 @@ async function returnPc(id) {
   } catch (e) { say(e.message === 'returned' ? 'This PC has already been returned.' : 'Could not record the return.'); }
 }
 async function editPc(id) {
-  if (!isAdmin()) return;
+  if (!hasPermission('attendance')) return;
   const rec = records().find(x => x.id === id); if (!rec) return;
   const v = prompt(`New PC number for ${rec.name} (1 to ${settings().totalPCs}):`, rec.pc);
   if (v === null) return;
@@ -685,7 +783,7 @@ async function editPc(id) {
   } catch (e) { say(e.message === 'taken' ? `PC ${n} is already taken on that day.` : 'Could not save.'); }
 }
 async function removeRec(id) {
-  if (!isAdmin() || !confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
+  if (!hasPermission('attendance') || !confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
   const rec = records().find(x => x.id === id);
   if (!rec) return;
   const recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`), studentDayRef = fs.collection('studentDays').doc(`${rec.date}_${rec.sn}`);
@@ -760,13 +858,14 @@ async function showQuota() {
   } catch (e) {}
 }
 function adminReports() {
-  const list = [...liveReports()].sort((a, b) => b.created - a.created), files = studentSubmittedFiles();
+  const list = [...liveReports()].sort((a, b) => b.created - a.created);
+  const files = studentSubmittedFiles().filter(file => hasPermission('updates') || file.kind === 'Absence report');
   $('app').innerHTML = `<div class="msg err">${msg}</div><div class="card"><h2>Absence reports</h2>
     <p>Reports disappear by themselves 7 days after they are sent. Approve or reject each one based on the reason.</p>
     ${list.length ? list.map(r => reportCard(r, true)).join('') : '<p>No reports.</p>'}</div>
     <div class="card"><h2>Files submitted by students</h2>
       <p>${files.length} file(s), including absence-report documents and ZIP replies.</p>
-      <button id="downloadAllStudentFiles" onclick="downloadAllStudentFiles()" ${files.length && !uploadBusy ? '' : 'disabled'}>Download all as ZIP</button>
+      ${hasPermission('updates') ? `<button id="downloadAllStudentFiles" onclick="downloadAllStudentFiles()" ${files.length && !uploadBusy ? '' : 'disabled'}>Download all as ZIP</button>` : ''}
       <div id="studentFilesProgress" class="download-progress" aria-live="polite"></div>
       ${files.length ? files.map(file => `<div class="rep"><b>${esc(file.studentName)}</b> (${esc(file.sn)}) · ${esc(file.kind)} · ${esc(file.date)}<br><a href="${esc(file.url)}" target="_blank" rel="noopener noreferrer">Open / download ${esc(file.name)}</a>${file.size ? ` (${(file.size / 1048576).toFixed(1)} MB)` : ''}</div>`).join('') : '<p>No student files submitted.</p>'}
     </div>`;
@@ -784,7 +883,7 @@ function studentSubmittedFiles() {
 }
 const archiveName = value => String(value || 'file').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 100);
 async function downloadAllStudentFiles() {
-  if (!isAdmin() || uploadBusy) return;
+  if (!hasPermission('updates') || uploadBusy) return;
   const files = studentSubmittedFiles(), status = $('studentFilesProgress'), button = $('downloadAllStudentFiles');
   if (!files.length) { status.textContent = 'No student files to download.'; return; }
   if (typeof JSZip === 'undefined') { status.textContent = 'The ZIP library did not load. Check your internet and try again.'; return; }
@@ -851,14 +950,15 @@ function zipReplyCard(reply) {
   const groupText = reply.studentType ? `Student type: ${reply.studentType}` : reply.group ? groupLabel(reply.group, reply.groupYear) : 'No group assigned';
   return `<div class="rep"><b>${esc(reply.name)}</b> (${esc(reply.sn)}) · ${esc(groupText)}<br>
     <a href="${esc(reply.file.url)}" target="_blank" rel="noopener">${esc(reply.file.name)}</a> (${(reply.file.size / 1048576).toFixed(1)} MB)<br>
-    <small>Received ${new Date(reply.created).toLocaleString()}</small><br><button class="sm alt" onclick="deleteZipReply('${reply.id}')">Delete</button></div>`;
+    <small>Received ${new Date(reply.created).toLocaleString()}</small>${hasPermission('updates') ? `<br><button class="sm alt" onclick="deleteZipReply('${reply.id}')">Delete</button>` : ''}</div>`;
 }
-function updatesView(admin) {
+function updatesView(staff) {
+  const canManage = staff && hasPermission('updates');
   const group = assignedGroup();
   const replies = C.zipReplies.slice().sort((a, b) => b.created - a.created);
-  const visible = C.updates.filter(x => admin || !x.group || x.group === 'All students' || x.group === group)
+  const visible = C.updates.filter(x => staff || !x.group || x.group === 'All students' || x.group === group)
     .sort((a, b) => b.created - a.created);
-  $('app').innerHTML = `${admin ? `<div class="card"><h2>Share with students</h2>
+  $('app').innerHTML = `${canManage ? `<div class="card"><h2>Share with students</h2>
     <label for="ut">Title</label><input id="ut" maxlength="120">
     <label for="um">Announcement</label><textarea id="um" rows="4" maxlength="2000"></textarea>
     <label for="ug">Send to</label><select id="ug"><option value="All students">All students (every group)</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select>
@@ -867,11 +967,11 @@ function updatesView(admin) {
     <p>Send one ZIP file, up to 300 MB. The admin will see your name and group or student type.</p>
     <label for="studentZip">ZIP file</label><input id="studentZip" type="file" accept=".zip,application/zip,application/x-zip-compressed">
     <button id="sendZipBtn" onclick="sendZipReply()">Send ZIP</button><div id="uploadStatus" class="msg"></div><div class="msg err">${msg}</div></div>`}
-    <div class="card"><h2>${admin ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, admin)).join('') : '<p>No updates yet.</p>'}</div>`;
-  if (admin) $('app').insertAdjacentHTML('beforeend', `<div class="card"><h2>ZIP files from students</h2>${zipRepliesError ? `<p class="err">${esc(zipRepliesError)}</p>` : ''}${replies.length ? replies.map(zipReplyCard).join('') : '<p>No ZIP files received.</p>'}</div>`);
+    <div class="card"><h2>${staff ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, canManage)).join('') : '<p>No updates yet.</p>'}</div>`;
+  if (canManage) $('app').insertAdjacentHTML('beforeend', `<div class="card"><h2>ZIP files from students</h2>${zipRepliesError ? `<p class="err">${esc(zipRepliesError)}</p>` : ''}${replies.length ? replies.map(zipReplyCard).join('') : '<p>No ZIP files received.</p>'}</div>`);
 }
 async function publishUpdate() {
-  if (!isAdmin() || uploadBusy) return;
+  if (!hasPermission('updates') || uploadBusy) return;
   const title = $('ut').value.trim(), message = $('um').value.trim(), group = $('ug').value, filesToUpload = [...$('uf').files];
   if (!title) return say('Add a title.');
   if (!message && !filesToUpload.length) return say('Add an announcement or attach a document.');
@@ -914,7 +1014,7 @@ async function sendZipReply() {
   } finally { uploadBusy = false; }
 }
 async function deleteZipReply(id) {
-  if (!isAdmin() || !confirm('Delete this student ZIP and its stored file?')) return;
+  if (!hasPermission('updates') || !confirm('Delete this student ZIP and its stored file?')) return;
   const reply = C.zipReplies.find(x => x.id === id);
   try {
     await fs.collection('zipReplies').doc(id).delete();
@@ -923,7 +1023,7 @@ async function deleteZipReply(id) {
   render();
 }
 async function deleteUpdate(id) {
-  if (!isAdmin() || !confirm('Delete this update?')) return;
+  if (!hasPermission('updates') || !confirm('Delete this update?')) return;
   const item = C.updates.find(x => x.id === id);
   try {
     await fs.collection('updates').doc(id).delete();
@@ -931,41 +1031,43 @@ async function deleteUpdate(id) {
   } catch (e) { say('Could not delete the update.'); }
 }
 async function decide(id, status) {
-  if (!isAdmin()) return;
+  if (!hasPermission('reports')) return;
   const note = prompt(status === 'approved' ? 'Note for the student (optional):' : 'Why is it rejected? (optional note for the student):', '');
   if (note === null) return;
   await fs.collection('reports').doc(id).update({ status, note: note.trim(), decidedBy: session.user });
 }
 async function delReport(id) {
-  if (!isAdmin() || !confirm('Delete this report?')) return;
+  if (!hasPermission('reports') || !confirm('Delete this report?')) return;
   await fs.collection('reports').doc(id).delete();
 }
 
 /* ---------- Downloads ---------- */
 function reportName() {
-  if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `PC-register-week-${ymd(m)}-to-${ymd(f)}`; }
-  return `PC-register-month-${range.value.slice(0, 7)}`;
+  if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `WM-LPR-week-${ymd(m)}-to-${ymd(f)}`; }
+  return `WM-LPR-month-${range.value.slice(0, 7)}`;
 }
 const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
 const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at', 'Signature'];
 function exportXlsx() {
+  if (!hasPermission('attendance')) return;
   const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
   ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:20},{wch:12},{wch:12},{wch:22},{wch:16}];
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Register');
   XLSX.writeFile(wb, reportName() + '.xlsx');
 }
 function exportPdf() {
+  if (!hasPermission('attendance')) return;
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
-  doc.setFontSize(14); doc.text('PC Register: ' + reportName().replace('PC-register-', ''), 14, 16);
+  doc.setFontSize(14); doc.text('WM-LPR: ' + reportName().replace('WM-LPR-', ''), 14, 16);
   doc.autoTable({ head: [HEAD], body: rows(), startY: 22, styles: { fontSize: 9 } });
   doc.save(reportName() + '.pdf');
 }
 function exportGroupPdf() {
-  if (!isAdmin()) return;
+  if (!hasPermission('attendance')) return;
   const group = $('groupExport').value, groupRows = inRange().filter(r => r.group === group);
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
   doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text(groupLabel(group), 14, 15);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('PC-register-', ''), 14, 22);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('WM-LPR-', ''), 14, 22);
   doc.autoTable({
     head: [['Date', 'Day', 'Student no.', 'Name', 'PC', 'Signed in', 'Returned at', 'Signature']],
     body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), '']),
