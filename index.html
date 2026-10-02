@@ -6,6 +6,7 @@
 <title>PC Register</title>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
@@ -78,11 +79,12 @@ async function hash(s) {
 }
 
 /* ---------- Shared online data (Firebase Firestore) ---------- */
-let fs = null;
-const C = { settings: { totalPCs: 41, admins: [], groups: [] }, users: [], records: [], reports: [] };
+let fs = null, storage = null;
+const C = { settings: { totalPCs: 41, admins: [], groups: [] }, users: [], records: [], reports: [], updates: [] };
 const WEEK = 7 * 864e5;
 const liveReports = () => C.reports.filter(x => Date.now() - x.created <= WEEK);
 const loaded = { s: 0, u: 0, r: 0, p: 0 };
+let updatesError = '';
 const ready = () => loaded.s && loaded.u && loaded.r && loaded.p;
 const settings = () => C.settings, users = () => C.users, records = () => C.records;
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
@@ -104,7 +106,7 @@ function start() {
     return;
   }
   if (typeof firebase === 'undefined') return fail('Firebase could not load. Check your internet.');
-  firebase.initializeApp(firebaseConfig); fs = firebase.firestore();
+  firebase.initializeApp(firebaseConfig); fs = firebase.firestore(); storage = firebase.storage();
   fs.doc('settings/main').onSnapshot(d => {
     if (d.exists) { C.settings = d.data(); C.settings.admins = C.settings.admins || []; C.settings.groups = C.settings.groups || []; }
     loaded.s = 1; refresh();
@@ -116,6 +118,7 @@ function start() {
     C.reports.filter(x => Date.now() - x.created > WEEK).forEach(x => fs.collection('reports').doc(x.id).delete().catch(() => {}));
     loaded.p = 1; refresh();
   }, fail);
+  fs.collection('updates').onSnapshot(q => { C.updates = q.docs.map(d => d.data()); updatesError = ''; refresh(); }, () => { updatesError = 'Updates are unavailable. Check Firestore rules.'; refresh(); });
 }
 function refresh() {
   if (!ready()) return;
@@ -133,11 +136,13 @@ function render() {
   if (!session) return authView();
   const adm = session.role === 'admin', n = liveReports().filter(r => r.status === 'pending').length;
   $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${adm ? 'Admin' : 'Register'}</a>` +
-    `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${adm ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>`;
+    `<a href="#reports" class="${page() === 'reports' ? 'on' : ''}">${adm ? 'Absence reports' + (n ? ` (${n} waiting)` : '') : 'Report absence'}</a>` +
+    `<a href="#updates" class="${page() === 'updates' ? 'on' : ''}">Updates</a>`;
+  if (page() === 'updates') return updatesView(adm);
   if (page() === 'reports') return adm ? adminReports() : studentReports();
   adm ? adminView() : studentView();
 }
-const page = () => location.hash === '#reports' ? 'reports' : 'register';
+const page = () => location.hash === '#reports' ? 'reports' : location.hash === '#updates' ? 'updates' : 'register';
 window.addEventListener('hashchange', () => { msg = ''; render(); });
 function authView() {
   const needAdmin = !settings().admins.length;
@@ -151,7 +156,7 @@ function authView() {
     </div>
     ${tab === 'signup' ? `
       <label for="n">Full name</label><input id="n" autocomplete="name">
-      <label for="s">Student number</label><input id="s">
+      <label for="s">Student number</label><input id="s" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,13)">
       <label for="p">Password (at least 6 characters)</label><input id="p" type="password">
       <button onclick="signup()">Create account</button>` :
     tab === 'login' ? `
@@ -171,7 +176,7 @@ const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render
 async function signup() {
   const name = $('n').value.trim(), sn = $('s').value.trim().toUpperCase(), p = $('p').value;
   if (!name || !sn) return say('Please fill in your name and student number.');
-  if (!/^[A-Z0-9-]{3,30}$/.test(sn)) return say('Student number can only have letters, numbers and dashes.');
+  if (!/^\d{1,13}$/.test(sn)) return say('Student number must contain only digits and be no more than 13 digits.');
   if (findAdmin(sn)) return say('This student number is not allowed.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   try {
@@ -218,7 +223,9 @@ const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this
   : e.code === 3 ? 'Finding your location took too long. Go near a window, switch on GPS, and try again.'
   : 'Could not find your location. Switch on location and try again.';
 let busy = false, myGroup = '';
-const assignedGroup = () => (users().find(u => u.sn === session.sn) || {}).group || '';
+const studentProfile = () => users().find(u => u.sn === session.sn) || {};
+const assignedGroup = () => studentProfile().group || '';
+const groupLocked = () => Boolean(studentProfile().group || studentProfile().groupLocked);
 const personalNums = () => [...(settings().personalPCs || [])].sort((a, b) => a - b);
 const isP = r => r.personal || r.pc === 'Personal';
 const pcLabel = r => r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
@@ -239,7 +246,7 @@ function studentView() {
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
       ${pcells ? `<p>Using your own PC? Pick a personal PC number:</p><div class="grid">${pcells}</div>` : ''}
-      ${assignedGroup() ? `<p>Your group: <b>${esc(assignedGroup())}</b></p>` : (settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
+      ${assignedGroup() ? `<p>Your group: <b>${esc(assignedGroup())}</b> (ask an admin to change it)</p>` : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>' : (settings().groups || []).length ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.map(g => `<option ${g === myGroup ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'}
       <button ${pick ? '' : 'disabled'} onclick="sign()">${pick ? (personalNums().includes(pick) ? 'Sign for personal PC ' : 'Sign for PC ') + pick : 'Choose a PC first'}</button>`;
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
@@ -252,8 +259,8 @@ async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
   if (records().some(x => x.date === today && x.sn === session.sn)) return say('You have already signed today.');
-  const grp = assignedGroup() || myGroup;
-  if (!grp) return say('Please choose your group.');
+  const grp = assignedGroup() || (groupLocked() ? '' : myGroup);
+  if (!grp) return say(groupLocked() ? 'Your group has not been assigned. Please ask an admin.' : 'Please choose your group.');
   const lab = settings().lab;
   if (!lab) return say('The admin has not set the lab location yet. Please tell the admin.');
   if (busy) return;
@@ -266,7 +273,14 @@ async function sign() {
   const t = new Date(), rec = { id: `${today}_pc${pick}`, date: today, sn: session.sn, name: session.name, group: grp, pc: pick, personal: personalNums().includes(pick), time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
   const ref = fs.collection('records').doc(rec.id);
   try {
-    await fs.runTransaction(async tx => { if ((await tx.get(ref)).exists) throw new Error('taken'); tx.set(ref, rec); });
+    const userRef = fs.collection('users').doc(session.sn);
+    await fs.runTransaction(async tx => {
+      const existing = await tx.get(ref), user = await tx.get(userRef);
+      if (existing.exists) throw new Error('taken');
+      tx.set(ref, rec);
+      const profile = user.data() || {};
+      if (!profile.group && !profile.groupLocked) tx.update(userRef, { group: grp, groupLocked: true });
+    });
     pick = null; render();
   } catch (e) { pick = null; say(e.message === 'taken' ? 'Someone just took that PC. Pick another one.' : 'Could not save. Check your internet and try again.'); }
 }
@@ -401,7 +415,7 @@ const groupOpts = cur => {
 function assignGroup(i, group) {
   if (!isAdmin()) return;
   const u = users()[i];
-  fs.collection('users').doc(u.sn).update({ group }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
+  fs.collection('users').doc(u.sn).update({ group, groupLocked: true }).then(() => say(group ? `${esc(u.name)} is now in group ${esc(group)}.` : `${esc(u.name)} has no group now.`, true), () => say('Could not save.'));
 }
 function addPersonalNums() {
   if (!isAdmin()) return;
@@ -502,7 +516,9 @@ async function removeRec(id) {
 const STATUS = { pending: 'Waiting for the admin', approved: 'Approved', rejected: 'Rejected' };
 function reportCard(r, admin) {
   const left = Math.max(1, Math.ceil((r.created + WEEK - Date.now()) / 864e5));
+  const attachments = (r.attachments || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>${f.type && f.type.startsWith('image/') ? ` <img src="${esc(f.url)}" alt="${esc(f.name)}" style="display:block;max-width:220px;max-height:180px;margin-top:6px">` : ''}`).join('<br>');
   return `<div class="rep ${r.status}"><b>${esc(r.name)}</b> (${esc(r.sn)}): ${esc(r.type)} on ${r.date} (${dayName(r.date)})<br>${esc(r.reason)}<br>
+    ${attachments ? `<p>Supporting documents:<br>${attachments}</p>` : ''}
     <small>Sent ${new Date(r.created).toLocaleString()}. Disappears in ${left} day(s).</small><br>
     <b>${STATUS[r.status]}</b>${r.note ? `. Admin note: ${esc(r.note)}` : ''}
     ${admin ? `<br><button class="sm" onclick="decide('${r.id}','approved')">Approve</button><button class="sm alt" onclick="decide('${r.id}','rejected')">Reject</button><button class="sm alt" onclick="delReport('${r.id}')">Delete</button>` : ''}</div>`;
@@ -516,26 +532,32 @@ function studentReports() {
     <div class="row"><div><label for="rk">Type</label><select id="rk"><option>Absent</option><option>Late</option><option>Leaving early</option><option>Other</option></select></div>
     <div><label for="rd">Date</label><input id="rd" type="date" value="${ymd(new Date())}"></div></div>
     <label for="rr">Reason</label><textarea id="rr" rows="4" maxlength="500"></textarea>
+    <label for="rf">Supporting documents (optional; images, PDF, or Word documents, up to 10 MB each)</label><input id="rf" type="file" accept="image/*,.pdf,.doc,.docx" multiple>
     <button onclick="sendReport()">Send report</button><div class="msg err">${msg}</div></div>
   <div class="card"><h2>My reports</h2>${mine.length ? mine.map(r => reportCard(r, false)).join('') : '<p>You have no reports.</p>'}</div>`;
   showQuota();
 }
 async function sendReport() {
   const type = $('rk').value, date = $('rd').value, reason = $('rr').value.trim();
+  const files = [...$('rf').files];
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
   if (reason.length < 5) return say('Please write a reason (at least 5 characters).');
+  if (files.some(file => !validUpload(file))) return say('Choose images, PDFs, or Word documents no larger than 10 MB each.');
   const now = Date.now(), id = `${session.sn}_${now}`;
   const logRef = fs.collection('reportlog').doc(session.sn), repRef = fs.collection('reports').doc(id);
+  let attachments = [];
   try {
+    for (const file of files) attachments.push(await uploadFile(`reports/${session.sn}/${id}`, file));
     await fs.runTransaction(async tx => {
       const d = await tx.get(logRef), times = d.exists ? d.data().times : [], u = usage(times, now);
       if (u.w >= LIMIT_WEEK) throw new Error('week');
       if (u.m >= LIMIT_MONTH) throw new Error('month');
       tx.set(logRef, { sn: session.sn, times: [...times.filter(x => x > now - 40 * 864e5), now] });
-      tx.set(repRef, { id, sn: session.sn, name: session.name, type, date, reason, created: now, status: 'pending', note: '' });
+      tx.set(repRef, { id, sn: session.sn, name: session.name, type, date, reason, attachments, created: now, status: 'pending', note: '' });
     });
     say('Report sent. The admin will approve or reject it.', true);
   } catch (e) {
+    await Promise.all(attachments.map(f => storage.ref(f.path).delete().catch(() => {})));
     say(e.message === 'week' ? `You already sent ${LIMIT_WEEK} reports this week. You can send again from next Monday.`
       : e.message === 'month' ? `You already sent ${LIMIT_MONTH} reports this month. You can send again next month.`
       : 'Could not send. Check your internet.');
@@ -556,6 +578,62 @@ function adminReports() {
   $('app').innerHTML = `<div class="msg err">${msg}</div><div class="card"><h2>Absence reports</h2>
     <p>Reports disappear by themselves 7 days after they are sent. Approve or reject each one based on the reason.</p>
     ${list.length ? list.map(r => reportCard(r, true)).join('') : '<p>No reports.</p>'}</div>`;
+}
+
+/* ---------- Announcements and group documents ---------- */
+const MAX_UPLOAD = 10 * 1024 * 1024;
+function validUpload(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  return file.size <= MAX_UPLOAD && (file.type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'heif', 'pdf', 'doc', 'docx'].includes(ext));
+}
+async function uploadFile(path, file) {
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const ref = storage.ref(`${path}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`);
+  await ref.put(file);
+  return { name: file.name, type: file.type || '', path: ref.fullPath, url: await ref.getDownloadURL() };
+}
+function updateCard(item, admin) {
+  const fileLinks = (item.files || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>`).join('<br>');
+  return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(item.group || 'All students')} · ${new Date(item.created).toLocaleString()}</small>
+    ${item.message ? `<p>${esc(item.message).replace(/\n/g, '<br>')}</p>` : ''}${fileLinks ? `<p>${fileLinks}</p>` : ''}
+    ${admin ? `<button class="sm alt" onclick="deleteUpdate('${item.id}')">Delete</button>` : ''}</div>`;
+}
+function updatesView(admin) {
+  const group = assignedGroup();
+  const visible = C.updates.filter(x => admin || !x.group || x.group === 'All students' || x.group === group)
+    .sort((a, b) => b.created - a.created);
+  $('app').innerHTML = `${admin ? `<div class="card"><h2>Share with students</h2>
+    <label for="ut">Title</label><input id="ut" maxlength="120">
+    <label for="um">Announcement</label><textarea id="um" rows="4" maxlength="2000"></textarea>
+    <label for="ug">Send to</label><select id="ug"><option>All students</option>${(settings().groups || []).map(g => `<option>${esc(g)}</option>`).join('')}</select>
+    <label for="uf">Attach documents (optional; images, PDF, or Word documents, up to 10 MB each)</label><input id="uf" type="file" accept="image/*,.pdf,.doc,.docx" multiple>
+    <button onclick="publishUpdate()">Publish</button><div class="msg err">${msg}</div></div>` : ''}
+    <div class="card"><h2>${admin ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, admin)).join('') : '<p>No updates yet.</p>'}</div>`;
+}
+async function publishUpdate() {
+  if (!isAdmin()) return;
+  const title = $('ut').value.trim(), message = $('um').value.trim(), group = $('ug').value, filesToUpload = [...$('uf').files];
+  if (!title) return say('Add a title.');
+  if (!message && !filesToUpload.length) return say('Add an announcement or attach a document.');
+  if (filesToUpload.some(file => !validUpload(file))) return say('Choose images, PDFs, or Word documents no larger than 10 MB each.');
+  const id = `update_${Date.now()}`;
+  const files = [];
+  try {
+    for (const file of filesToUpload) files.push(await uploadFile(`updates/${id}`, file));
+    await fs.collection('updates').doc(id).set({ id, title, message, group, files, created: Date.now(), createdBy: session.user });
+    msg = ''; render();
+  } catch (e) {
+    await Promise.all(files.map(f => storage.ref(f.path).delete().catch(() => {})));
+    say('Could not publish. Check Firebase Storage is enabled and try again.');
+  }
+}
+async function deleteUpdate(id) {
+  if (!isAdmin() || !confirm('Delete this update?')) return;
+  const item = C.updates.find(x => x.id === id);
+  try {
+    await fs.collection('updates').doc(id).delete();
+    await Promise.all((item && item.files || []).map(f => storage.ref(f.path).delete().catch(() => {})));
+  } catch (e) { say('Could not delete the update.'); }
 }
 async function decide(id, status) {
   if (!isAdmin()) return;
