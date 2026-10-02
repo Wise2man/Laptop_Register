@@ -87,7 +87,19 @@ const liveReports = () => C.reports.filter(x => Date.now() - x.created <= WEEK);
 const loaded = { s: 0, u: 0, r: 0, p: 0 };
 let updatesError = '', zipRepliesError = '', uploadBusy = false;
 const ready = () => loaded.s && loaded.u && loaded.r && loaded.p;
-const settings = () => C.settings, users = () => C.users, records = () => C.records;
+function dedupeAttendance(list) {
+  const byStudentDay = new Map();
+  for (const record of list) {
+    const eventTime = record.time || record.signedAt || record.id || '';
+    const key = `${record.date || ''}_${record.sn || ''}_${eventTime}`, current = byStudentDay.get(key);
+    const validPc = hasRecordedPc(record.pc);
+    const currentPc = current && hasRecordedPc(current.pc);
+    if (!current || (validPc && !currentPc) || (validPc === currentPc && (Number(record.signedAt) || Infinity) < (Number(current.signedAt) || Infinity)) || (validPc === currentPc && record.signedAt === current.signedAt && String(record.id) < String(current.id))) byStudentDay.set(key, record);
+  }
+  return [...byStudentDay.values()];
+}
+const hasRecordedPc = pc => pc !== null && pc !== undefined && String(pc).trim() !== '' && !['null', 'undefined'].includes(String(pc).trim().toLowerCase());
+const settings = () => C.settings, users = () => C.users, records = () => dedupeAttendance(C.records);
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
 const saveSettings = st => fs.doc('settings/main').set(st);
 let session = null;
@@ -115,7 +127,7 @@ function start() {
     loaded.s = 1; refresh();
   }, fail);
   fs.collection('users').onSnapshot(q => { C.users = q.docs.map(d => d.data()); loaded.u = 1; refresh(); }, fail);
-  fs.collection('records').onSnapshot(q => { C.records = q.docs.map(d => d.data()); loaded.r = 1; refresh(); }, fail);
+  fs.collection('records').onSnapshot(q => { C.records = q.docs.map(d => ({ ...d.data(), id: d.data().id || d.id })); loaded.r = 1; refresh(); }, fail);
   fs.collection('reports').onSnapshot(q => {
     C.reports = q.docs.map(d => d.data());
     C.reports.filter(x => Date.now() - x.created > WEEK).forEach(x => fs.collection('reports').doc(x.id).delete().catch(() => {}));
@@ -226,8 +238,14 @@ async function signup() {
   if (p.length < 6) return say('Password must have at least 6 characters.');
   try {
     const ref = fs.collection('users').doc(sn);
-    if ((await ref.get()).exists) return say('This student number already has an account. Please log in.');
-    await ref.set({ name, sn, pw: await hash(sn + ':' + p), signature });
+    const account = { name, sn, pw: await hash(sn + ':' + p), signature };
+    let exists = false;
+    await fs.runTransaction(async tx => {
+      const current = await tx.get(ref);
+      if (current.exists) { exists = true; return; }
+      tx.set(ref, account);
+    });
+    if (exists) return say('This student number already has an account. Please log in.');
     tab = 'login'; say('Account created. You can log in now.', true);
   } catch (e) { say('Could not save. Check your internet.'); }
 }
@@ -286,7 +304,7 @@ function groupLabel(group, year) {
 }
 const personalNums = () => [...(settings().personalPCs || [])].sort((a, b) => a - b);
 const isP = r => r.personal || r.pc === 'Personal';
-const pcLabel = r => r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
+const pcLabel = r => !hasRecordedPc(r.pc) ? 'Not recorded' : r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
 const attendanceStudentType = r => r.studentType || (isLegacyPersonalGroup(r.group) && (users().find(u => u.sn === r.sn) || {}).studentType) || '';
 const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStudentType(r) || 'Student type needed') : r.group ? groupLabel(r.group, r.groupYear) : attendanceStudentType(r);
 
@@ -294,11 +312,11 @@ const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStud
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc && !r.returnedAt);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs;
-  const mine = records().find(r => r.date === today && r.sn === session.sn && !r.returnedAt);
+  const mine = records().find(r => r.date === today && r.sn === session.sn);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
-  else if (mine) top = `<p>Today you are holding</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : 'PC ' + mine.pc}</div>
-      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}. You cannot change your PC. Please ask the admin if there is a problem.`}${mine.studentType ? ' Student type: ' + esc(mine.studentType) + '.' : mine.group ? ' Group: ' + esc(groupLabel(mine.group, mine.groupYear)) + '.' : ''}</p>`;
+    else if (mine) top = `<p>${mine.returnedAt ? 'Attendance recorded; PC returned' : 'Today you are holding'}</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : `PC ${pcLabel(mine)}`}</div>
+      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}${mine.returnedAt ? `; returned at ${new Date(mine.returnedAt).toLocaleTimeString()}` : ''}. You cannot sign in again today.`}${mine.studentType ? ' Student type: ' + esc(mine.studentType) + '.' : mine.group ? ' Group: ' + esc(groupLabel(mine.group, mine.groupYear)) + '.' : ''}</p>`;
   else {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
@@ -318,7 +336,7 @@ const choose = i => { pick = i; render(); };
 async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
-  if (records().some(x => x.date === today && x.sn === session.sn && !x.returnedAt)) return say('You already have a PC checked out.');
+  if (records().some(x => x.date === today && x.sn === session.sn)) return say('You already have an attendance record today and cannot sign in again.');
   const studentType = usesStudentType() ? studentProfile().studentType || myStudentType : '';
   const grp = usesStudentType() ? '' : assignedGroup() || (groupLocked() ? '' : myGroup);
   if (usesStudentType() && !studentType) return say('Please choose your student type.');
@@ -334,20 +352,21 @@ async function sign() {
   busy = false;
   const t = new Date(), slotId = `${today}_pc${pick}`;
   const rec = { id: `${slotId}_${session.sn}_${t.getTime()}`, date: today, sn: session.sn, name: session.name, group: grp, groupYear: groupYearFor(grp), studentType, signature: studentProfile().signature || '', signedAt: t.getTime(), pc: pick, personal: personalNums().includes(pick), time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
-  const ref = fs.collection('records').doc(rec.id), slotRef = fs.collection('slots').doc(slotId), legacyRef = fs.collection('records').doc(slotId);
+  const ref = fs.collection('records').doc(rec.id), slotRef = fs.collection('slots').doc(slotId), legacyRef = fs.collection('records').doc(slotId), studentDayRef = fs.collection('studentDays').doc(`${today}_${session.sn}`);
   try {
     const userRef = fs.collection('users').doc(session.sn);
     await fs.runTransaction(async tx => {
-      const existing = await tx.get(ref), user = await tx.get(userRef), slot = await tx.get(slotRef), legacy = await tx.get(legacyRef);
-      if (existing.exists || slot.exists || (legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
+      const existing = await tx.get(ref), user = await tx.get(userRef), slot = await tx.get(slotRef), legacy = await tx.get(legacyRef), studentDay = await tx.get(studentDayRef);
+      if (existing.exists || slot.exists || studentDay.exists || (legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
       tx.set(ref, rec);
       tx.set(slotRef, { recordId: rec.id });
+      tx.set(studentDayRef, { sn: session.sn, date: today, recordId: rec.id });
       const profile = user.data() || {};
       if (usesStudentType()) tx.update(userRef, { group: '', studentType, personalPCProgram: true, groupLocked: true });
       else if (!profile.group && !profile.groupLocked) tx.update(userRef, { group: grp, groupLocked: true });
     });
     pick = null; render();
-  } catch (e) { pick = null; say(e.message === 'taken' ? 'Someone just took that PC. Pick another one.' : 'Could not save. Check your internet and try again.'); }
+  } catch (e) { pick = null; say(e.message === 'taken' ? 'This student already has an attendance record today, or that PC is taken.' : 'Could not save. Check your internet and try again.'); }
 }
 
 /* ---------- Admin ---------- */
@@ -360,6 +379,43 @@ function inRange() {
   } else list = list.filter(r => r.date.startsWith(range.value.slice(0, 7)));
   return [...list].sort((a, b) => a.date.localeCompare(b.date) || String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
 }
+let attendanceFilters = { query: '', from: '', to: '', group: '', type: '', pc: '', status: '' };
+function filteredAttendance() {
+  const f = attendanceFilters, query = f.query.trim().toLowerCase();
+  return records().filter(r => {
+    const searchable = `${r.name || ''} ${r.sn || ''}`.toLowerCase();
+    if (query && !searchable.includes(query)) return false;
+    if (f.from && r.date < f.from || f.to && r.date > f.to) return false;
+    if (f.group && r.group !== f.group) return false;
+    if (f.type && attendanceStudentType(r) !== f.type) return false;
+    if (f.pc && String(r.pc || '').toLowerCase() !== f.pc.toLowerCase()) return false;
+    if (f.status === 'returned' && !r.returnedAt) return false;
+    if (f.status === 'out' && (r.returnedAt || isP(r))) return false;
+    if (f.status === 'personal' && !isP(r)) return false;
+    return true;
+  }).sort((a, b) => b.date.localeCompare(a.date) || (Number(b.signedAt) || 0) - (Number(a.signedAt) || 0));
+}
+function attendanceSearchCard() {
+  const f = attendanceFilters, list = filteredAttendance(), display = list.slice(0, 100);
+  return `<div class="card"><h2>Search attendance</h2>
+    <div class="row"><div><label for="attendanceQuery">Student name, surname, or number</label><input id="attendanceQuery" value="${esc(f.query)}" placeholder="Search students"></div>
+    <div><label for="attendanceFrom">From date</label><input id="attendanceFrom" type="date" value="${esc(f.from)}"></div>
+    <div><label for="attendanceTo">To date</label><input id="attendanceTo" type="date" value="${esc(f.to)}"></div></div>
+    <div class="row"><div><label for="attendanceGroup">Group</label><select id="attendanceGroup"><option value="">All groups</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}" ${f.group === g ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('')}</select></div>
+    <div><label for="attendanceType">Student type</label><select id="attendanceType"><option value="">All types</option>${studentTypes().map(type => `<option value="${esc(type)}" ${f.type === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></div>
+    <div><label for="attendancePc">PC number</label><input id="attendancePc" value="${esc(f.pc)}" inputmode="numeric" placeholder="Any PC"></div>
+    <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option></select></div></div>
+    <button onclick="applyAttendanceFilters()">Search</button><button class="alt" onclick="clearAttendanceFilters()">Clear</button>
+    <p>${list.length} match(es)${list.length > display.length ? `; showing the latest ${display.length}` : ''}.</p><div class="wrap">${table(display, true)}</div></div>`;
+}
+function applyAttendanceFilters() {
+  attendanceFilters = { query: $('attendanceQuery').value, from: $('attendanceFrom').value, to: $('attendanceTo').value, group: $('attendanceGroup').value, type: $('attendanceType').value, pc: $('attendancePc').value.trim(), status: $('attendanceStatus').value };
+  render();
+}
+function clearAttendanceFilters() {
+  attendanceFilters = { query: '', from: '', to: '', group: '', type: '', pc: '', status: '' };
+  render();
+}
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
@@ -368,6 +424,7 @@ function adminView() {
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
   ${dayCard()}
+  ${attendanceSearchCard()}
   <div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
@@ -569,20 +626,20 @@ async function markPersonal() {
   const personalPCProgram = Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group)), group = personalPCProgram ? '' : $('pg').value || u.group || '', studentType = personalPCProgram ? u.studentType || '' : '';
   if (personalPCProgram && !studentType) return say('Assign a student type before marking this student present.');
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
-  if (records().some(r => r.date === date && r.sn === sn && !r.returnedAt)) return say('This student already has a PC checked out.');
+  if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has an attendance record on that day.');
   const num = parseInt($('pn').value, 10) || 0;
   if (num && taken(date, num)) return say(`Personal PC ${num} is already taken on that day.`);
   const t = new Date(), slotId = num ? `${date}_pc${num}` : '', rec = { id: `${slotId || `${date}_personal_${sn}`}_${t.getTime()}`, date, sn, name: u.name, group, groupYear: groupYearFor(group), studentType, signature: u.signature || '', signedAt: t.getTime(), pc: num || 'Personal', personal: true, time: `${pad(t.getHours())}:${pad(t.getMinutes())}` };
-  const ref = fs.collection('records').doc(rec.id);
+  const ref = fs.collection('records').doc(rec.id), studentDayRef = fs.collection('studentDays').doc(`${date}_${sn}`);
   try {
-    if (num) {
-      const slotRef = fs.collection('slots').doc(slotId), legacyRef = fs.collection('records').doc(slotId);
-      await fs.runTransaction(async tx => {
-        const slot = await tx.get(slotRef), legacy = await tx.get(legacyRef), existing = await tx.get(ref);
-        if (slot.exists || existing.exists || (legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
-        tx.set(ref, rec); tx.set(slotRef, { recordId: rec.id });
-      });
-    } else await ref.set(rec);
+    const slotRef = num ? fs.collection('slots').doc(slotId) : null, legacyRef = num ? fs.collection('records').doc(slotId) : null;
+    await fs.runTransaction(async tx => {
+      const existing = await tx.get(ref), studentDay = await tx.get(studentDayRef);
+      const slot = slotRef ? await tx.get(slotRef) : null, legacy = legacyRef ? await tx.get(legacyRef) : null;
+      if (existing.exists || studentDay.exists || (slot && slot.exists) || (legacy && legacy.exists && !legacy.data().returnedAt)) throw new Error('taken');
+      tx.set(ref, rec); tx.set(studentDayRef, { sn, date, recordId: rec.id });
+      if (slotRef) tx.set(slotRef, { recordId: rec.id });
+    });
     say(`${esc(u.name)} is marked as using a personal PC on ${date}.`, true);
   } catch (e) { say(e.message === 'taken' ? `Personal PC ${num} is already taken on that day.` : 'Could not save.'); }
 }
@@ -659,11 +716,12 @@ async function removeRec(id) {
   if (!isAdmin() || !confirm('Remove this sign-in? The student will be able to pick a PC again.')) return;
   const rec = records().find(x => x.id === id);
   if (!rec) return;
-  const recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`);
+  const recRef = fs.collection('records').doc(id), slotRef = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`), studentDayRef = fs.collection('studentDays').doc(`${rec.date}_${rec.sn}`);
   await fs.runTransaction(async tx => {
-    const record = await tx.get(recRef), slot = await tx.get(slotRef);
+    const record = await tx.get(recRef), slot = await tx.get(slotRef), studentDay = await tx.get(studentDayRef);
     if (record.exists) tx.delete(recRef);
     if (slot.exists && slot.data().recordId === id) tx.delete(slotRef);
+    if (studentDay.exists && studentDay.data().recordId === id) tx.delete(studentDayRef);
   });
   render();
 }
