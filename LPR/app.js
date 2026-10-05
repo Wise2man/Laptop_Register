@@ -416,7 +416,6 @@ const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStud
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc && !r.returnedAt);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs, profile = studentProfile();
-  const category = attendanceTypeForProfile(profile) || myStudentType;
   const mine = records().find(r => r.date === today && r.sn === session.sn);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
@@ -427,10 +426,8 @@ function studentView() {
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
     const pcells = personalNums().map(n => `<button class="pc ${pick === n ? 'sel' : ''}" ${taken(today, n) ? 'disabled' : ''} onclick="choose(${n})">${n}</button>`).join('');
     const personalPick = personalNums().includes(pick);
-    const profileCategory = attendanceTypeForProfile(profile), category = personalPick ? myPersonalStudentType : profileCategory || myStudentType;
-    const categoryControl = profileCategory && !personalPick
-      ? `<p>Your student type: <b>${esc(profileCategory)}</b> (ask an admin to change it)</p>`
-      : `<label for="studentType">${personalPick ? 'Student type for this personal PC sign-in' : 'Student type'}</label><select id="studentType" onchange="${personalPick ? 'myPersonalStudentType' : 'myStudentType'}=this.value; render()"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}" ${type === category ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select>`;
+    const profileCategory = attendanceTypeForProfile(profile), category = personalPick ? myPersonalStudentType : myStudentType || profileCategory;
+    const categoryControl = `<label for="studentType">${personalPick ? 'Student type for this personal PC sign-in' : 'Student type'}</label><select id="studentType" onchange="${personalPick ? 'myPersonalStudentType' : 'myStudentType'}=this.value; render()"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}" ${type === category ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select>`;
     const groupControl = category === STUDENT_CATEGORY
       ? assignedGroup() ? `<p>Your group: <b>${esc(groupLabel(assignedGroup()))}</b> (ask an admin to change it)</p>`
         : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>'
@@ -453,7 +450,7 @@ async function sign() {
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
   if (records().some(x => x.date === today && x.sn === session.sn)) return say('You already have an attendance record today and cannot sign in again.');
   const personalPick = personalNums().includes(pick);
-  const studentType = personalPick ? myPersonalStudentType : attendanceTypeForProfile(studentProfile()) || myStudentType;
+  const studentType = personalPick ? myPersonalStudentType : myStudentType || attendanceTypeForProfile(studentProfile());
   if (personalPick && !studentType) return say('Choose a student type for the personal PC sign-in.');
   const grp = studentType === STUDENT_CATEGORY ? assignedGroup() || (groupLocked() ? '' : myGroup) : '';
   if (!studentType) return say('Please choose your student type.');
