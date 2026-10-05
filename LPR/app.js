@@ -486,6 +486,7 @@ async function sign() {
 /* ---------- Admin ---------- */
 let range = { type: 'week', value: ymd(new Date()) };
 let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', selectedStaffUser = '', adminTab = 'register';
+let studentSearch = { field: 'all', query: '' };
 function inRange() {
   let list = records();
   if (range.type === 'week') {
@@ -596,6 +597,28 @@ function adminStudentDetails() {
     <button class="sm alt" onclick="deleteStudent('${esc(user.sn)}')">Delete login and profile</button>
     <button class="sm alt" onclick="selectedStudentSn = ''; render()">Close details</button></div>`;
 }
+function matchingStudents() {
+  const query = studentSearch.query.trim().toLowerCase();
+  return users().filter(user => {
+    if (!query) return true;
+    const fields = {
+      name: user.name || '',
+      number: user.sn || '',
+      group: user.group && !isLegacyPersonalGroup(user.group) ? groupLabel(user.group) : '',
+      type: attendanceTypeForProfile(user) || ''
+    };
+    const value = studentSearch.field === 'all' ? Object.values(fields).join(' ') : fields[studentSearch.field];
+    return String(value || '').toLowerCase().includes(query);
+  });
+}
+function applyStudentSearch() {
+  studentSearch = { field: $('studentSearchField').value, query: $('studentSearchQuery').value.trim() };
+  render();
+}
+function clearStudentSearch() {
+  studentSearch = { field: 'all', query: '' };
+  render();
+}
 function adminStaffDetails() {
   const account = settings().admins.find(item => item.user === selectedStaffUser);
   if (!account) return '';
@@ -608,6 +631,7 @@ function adminStaffDetails() {
 }
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
+  const visibleStudents = matchingStudents();
   const sections = [
     { id: 'register', label: 'Today', permission: 'attendance' },
     { id: 'search', label: 'Search attendance', permission: 'attendance' },
@@ -682,7 +706,10 @@ function adminView() {
     <button onclick="changeAdminPw()">Change password</button></div></section>
   ${hasPermission('students') ? `<section class="${panel('students')}" role="tabpanel"><div class="card"><h2>Students</h2>
     <p>Assign regular groups or, for Lab Personal PC students, a separate student type.</p>
-    ${users().length ? `<ul>${users().map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students have signed up yet.</p>'}</div></section>` : ''}
+    <div class="row"><div><label for="studentSearchField">Search by</label><select id="studentSearchField"><option value="all" ${studentSearch.field === 'all' ? 'selected' : ''}>All fields</option><option value="name" ${studentSearch.field === 'name' ? 'selected' : ''}>Name</option><option value="number" ${studentSearch.field === 'number' ? 'selected' : ''}>Student number</option><option value="group" ${studentSearch.field === 'group' ? 'selected' : ''}>Group</option><option value="type" ${studentSearch.field === 'type' ? 'selected' : ''}>Student type</option></select></div>
+    <div><label for="studentSearchQuery">Find student</label><input id="studentSearchQuery" value="${esc(studentSearch.query)}" placeholder="Enter a name, number, group, or type"></div></div>
+    <button onclick="applyStudentSearch()">Search</button><button class="alt" onclick="clearStudentSearch()">Clear</button>
+    ${visibleStudents.length ? `<p>${visibleStudents.length} student(s) found.</p><ul>${visibleStudents.map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students match that search.</p>'}</div></section>` : ''}
   ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel"><div class="card"><h2>Exports</h2>
     <div class="row">
       <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
