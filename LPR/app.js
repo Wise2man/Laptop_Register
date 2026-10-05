@@ -47,7 +47,7 @@ function dedupeAttendance(list) {
 const hasRecordedPc = pc => pc !== null && pc !== undefined && String(pc).trim() !== '' && !['null', 'undefined'].includes(String(pc).trim().toLowerCase());
 const settings = () => C.settings, users = () => C.users, records = () => dedupeAttendance(C.records);
 const findAdmin = u => settings().admins.find(a => a.user === u.trim().toLowerCase());
-const PERMISSIONS = { attendance: 'Manage attendance', students: 'Manage student accounts', groups: 'Manage groups', settings: 'Change lab and PC settings', reports: 'Review absence reports', updates: 'Publish updates and manage student files', staff: 'Create and manage staff roles' };
+const PERMISSIONS = { attendance: 'Manage attendance', students: 'Manage student accounts', groups: 'Manage groups', settings: 'Change lab and PC settings', reports: 'Review absence reports', updates: 'Publish updates and manage student files', staff: 'Create and manage staff roles', redflags: 'View red flag and other absence lists', redflagsManage: 'Remove or restore red flags and remove students from the red flag list', redflagRules: 'Change red flag rules (absence limit, deduction, days off)' };
 const isStaff = () => Boolean(session && ['admin', 'staff'].includes(session.role) && settings().admins.some(a => a.user === session.user));
 const hasPermission = permission => {
   if (!isStaff()) return false;
@@ -407,8 +407,9 @@ function studentGroupJoinLink(group) {
   return link ? `<p class="group-link">${esc(groupLabel(group))}: <a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Join the WhatsApp group</a></p>` : '';
 }
 const personalNums = () => [...(settings().personalPCs || [])].sort((a, b) => a - b);
-const isP = r => r.personal || r.pc === 'Personal';
-const pcLabel = r => !hasRecordedPc(r.pc) ? 'Not recorded' : r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
+const isP = r => r.personal || r.pc === 'Personal' || r.excused; // excused records hold no PC
+const noPcText = r => r.excused ? 'Excused (approved report)' : 'Personal PC';
+const pcLabel = r => r.excused ? 'Excused' : !hasRecordedPc(r.pc) ? 'Not recorded' : r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
 const attendanceStudentType = r => r.studentType || (isLegacyPersonalGroup(r.group) && (users().find(u => u.sn === r.sn) || {}).studentType) || (r.group && !isLegacyPersonalGroup(r.group) ? STUDENT_CATEGORY : '');
 const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStudentType(r) || 'Student type needed') : r.group ? groupLabel(r.group, r.groupYear) : attendanceStudentType(r);
 
@@ -416,7 +417,8 @@ const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStud
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc && !r.returnedAt);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs, profile = studentProfile();
-  const mine = records().find(r => r.date === today && r.sn === session.sn);
+  const mine = records().find(r => r.date === today && r.sn === session.sn && !r.excused);
+  const excusedToday = records().find(r => r.date === today && r.sn === session.sn && r.excused);
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
     else if (mine) top = `<p>${mine.returnedAt ? 'Attendance recorded; PC returned' : 'Today you are holding'}</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : `PC ${pcLabel(mine)}`}</div>
@@ -441,14 +443,14 @@ function studentView() {
   }
   const hist = records().filter(r => r.sn === session.sn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
   $('app').innerHTML = `
-  <div class="card"><h2>${dayName(today)}, ${today}</h2>${top}${studentGroupJoinLink(assignedGroup() || myGroup)}<div class="msg err">${msg}</div></div>
+  <div class="card"><h2>${dayName(today)}, ${today}</h2>${excusedToday ? `<p class="good"><b>Your ${esc(excusedToday.reportType || 'absence')} report for today was approved. You are marked as attended.</b></p>` : ''}${top}${studentGroupJoinLink(assignedGroup() || myGroup)}<div class="msg err">${msg}</div></div>
   <div class="card"><h2>My last sign-ins</h2><div class="wrap">${table(hist, false)}</div></div>`;
 }
 const choose = i => { if (pick !== i) myPersonalStudentType = ''; pick = i; render(); };
 async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
-  if (records().some(x => x.date === today && x.sn === session.sn)) return say('You already have an attendance record today and cannot sign in again.');
+  if (records().some(x => x.date === today && x.sn === session.sn && !x.excused)) return say('You already have an attendance record today and cannot sign in again.');
   const personalPick = personalNums().includes(pick);
   const studentType = personalPick ? myPersonalStudentType : myStudentType || attendanceTypeForProfile(studentProfile());
   if (personalPick && !studentType) return say('Choose a student type for the personal PC sign-in.');
@@ -507,7 +509,8 @@ function filteredAttendance() {
     if (f.pc && String(r.pc || '').toLowerCase() !== f.pc.toLowerCase()) return false;
     if (f.status === 'returned' && !r.returnedAt) return false;
     if (f.status === 'out' && (r.returnedAt || isP(r))) return false;
-    if (f.status === 'personal' && !isP(r)) return false;
+    if (f.status === 'personal' && (!isP(r) || r.excused)) return false;
+    if (f.status === 'excused' && !r.excused) return false;
     return true;
   }).sort((a, b) => b.date.localeCompare(a.date) || (Number(b.signedAt) || 0) - (Number(a.signedAt) || 0));
 }
@@ -520,7 +523,7 @@ function attendanceSearchCard() {
     <div class="row"><div><label for="attendanceGroup">Group</label><select id="attendanceGroup"><option value="">All groups</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}" ${f.group === g ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('')}</select></div>
     <div><label for="attendanceType">Student type</label><select id="attendanceType"><option value="">All types</option>${studentTypes().map(type => `<option value="${esc(type)}" ${f.type === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></div>
     <div><label for="attendancePc">PC number</label><input id="attendancePc" value="${esc(f.pc)}" inputmode="numeric" placeholder="Any PC"></div>
-    <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option></select></div></div>
+    <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option><option value="excused" ${f.status === 'excused' ? 'selected' : ''}>Excused (approved report)</option></select></div></div>
     <button onclick="applyAttendanceFilters()">Search</button><button class="alt" onclick="clearAttendanceFilters()">Clear</button>
     <p>${list.length} match(es)${list.length > display.length ? `; showing the latest ${display.length}` : ''}.</p>${table(display, true)}</div>`;
 }
@@ -579,7 +582,7 @@ function adminRecordDetails() {
   return `<div class="card" id="recordDetails"><h2>Sign-in details</h2>
     <p><b>${esc(rec.name)}</b> (${esc(rec.sn)})</p>
     <p>${rec.date} (${dayName(rec.date)}) · ${esc(attendanceCategory(rec))} · ${pcLabel(rec)}</p>
-    <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? `${esc(new Date(rec.returnedAt).toLocaleString())} · marked by ${esc(rec.returnedBy || 'Staff not recorded')}` : isP(rec) ? 'Personal PC' : 'Not returned'}</p>
+    <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? `${esc(new Date(rec.returnedAt).toLocaleString())} · marked by ${esc(rec.returnedBy || 'Staff not recorded')}` : isP(rec) ? noPcText(rec) : 'Not returned'}</p>
     <p>Signature: ${rec.signature ? `<img src="${esc(rec.signature)}" alt="Signature of ${esc(rec.name)}" style="width:180px;height:64px;object-fit:contain">` : 'Not captured'}</p>
     ${isP(rec) ? '' : `<button class="sm" onclick="returnPc('${esc(rec.id)}')">Record return</button><button class="sm" onclick="editPc('${esc(rec.id)}')">Change PC</button>`}
     <button class="sm alt" onclick="removeRec('${esc(rec.id)}')">Remove sign-in</button>
@@ -629,6 +632,112 @@ function adminStaffDetails() {
     ${account.role === 'staff' && account.user !== session.user ? `<button class="sm alt" onclick="removeStaff(this.dataset.user)" data-user="${esc(account.user)}">Remove staff account</button>` : ''}
     <button class="sm alt" onclick="selectedStaffUser = ''; render()">Close details</button></div>`;
 }
+/* ---------- Red flags: too many absences in a month ---------- */
+const RF_DEFAULTS = { maxAbsent: 3, deductPercent: 10, stipend: 0, offDays: [] };
+const rfSettings = () => ({ ...RF_DEFAULTS, ...(settings().redFlag || {}) });
+let rfMonth = ymd(new Date()).slice(0, 7);
+const canManageFlags = () => hasPermission('redflagsManage'); // full admins always; staff only when granted
+const waiverKey = month => 'm' + month.replace('-', '_');
+function absenceReport(month, kind = 'students') {
+  const cfg = rfSettings(), [y, m] = month.split('-').map(Number), today = ymd(new Date());
+  const all = records(), off = new Set(cfg.offDays || []), out = [];
+  const lastDay = new Date(y, m, 0).getDate();
+  for (const u of users()) {
+    const isStudent = attendanceTypeForProfile(u) === STUDENT_CATEGORY;
+    if ((kind === 'students') !== isStudent) continue;
+    if (kind === 'students' && u.redFlagExcluded) continue; // removed from the list by a full admin
+    const mine = all.filter(r => r.sn === u.sn);
+    if (!mine.length) continue; // never signed in: start date unknown, so not counted
+    const first = mine.map(r => r.date).sort()[0], present = new Set(mine.map(r => r.date));
+    const excused = new Set(u.excusedDates || []);
+    const absent = [], excusedList = [];
+    for (let d = 1; d <= lastDay; d++) {
+      const day = ymd(new Date(y, m - 1, d));
+      if (day >= today || day < first || !isWeekday(parse(day)) || off.has(day) || present.has(day)) continue;
+      (excused.has(day) ? excusedList : absent).push(day);
+    }
+    const over = Math.max(0, absent.length - cfg.maxAbsent), waiver = (u.redFlagWaivers || {})[waiverKey(month)];
+    const wasFlagged = absent.length > cfg.maxAbsent, flagged = wasFlagged && !waiver;
+    out.push({ user: u, absent, excused: excusedList, over, flagged, waiver: wasFlagged ? waiver : null,
+      percent: flagged ? Math.min(100, over * cfg.deductPercent) : 0, amount: flagged && cfg.stipend ? Math.min(100, over * cfg.deductPercent) / 100 * cfg.stipend : 0 });
+  }
+  return out.filter(x => x.absent.length || x.excused.length).sort((a, b) => b.absent.length - a.absent.length || a.user.name.localeCompare(b.user.name));
+}
+function redFlagCard() {
+  const cfg = rfSettings(), rows = absenceReport(rfMonth), flagged = rows.filter(r => r.flagged);
+  const money = n => `R${n.toFixed(2)}`;
+  const line = r => `<tr style="${r.flagged ? 'background:color-mix(in srgb,var(--bad) 12%,transparent)' : ''}"><td><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(r.user.sn)}">${esc(r.user.name)}</a><br><small>${esc(r.user.sn)}</small></td>
+    <td>${r.flagged ? '<b class="err">&#9873; RED FLAG</b>' : r.waiver ? `<b class="good">Flag removed</b><br><small>by ${esc(r.waiver.by || 'admin')}</small>` : 'OK'}</td><td>${r.absent.length}</td><td>${r.excused.length}</td><td>${r.over}</td>
+    <td>${r.flagged ? `${r.percent}%${cfg.stipend ? ` (about ${money(r.amount)})` : ''}` : '-'}</td>
+    <td style="white-space:normal;min-width:180px">${r.absent.map(d => `${d.slice(8)}/${d.slice(5, 7)}`).join(', ') || '-'}</td>
+    <td style="min-width:150px">${!canManageFlags() ? '' : (r.flagged ? `<button class="sm alt" onclick="removeRedFlag(this.dataset.sn)" data-sn="${esc(r.user.sn)}">Remove flag (this month)</button>` : r.waiver ? `<button class="sm alt" onclick="restoreRedFlag(this.dataset.sn)" data-sn="${esc(r.user.sn)}">Restore flag</button>` : '') + `<button class="sm alt" onclick="excludeFromRedFlags(this.dataset.sn)" data-sn="${esc(r.user.sn)}">Remove from list</button>`}</td></tr>`;
+  return `<div class="card"><h2>&#9873; Red flags: too many absences</h2>
+    <p>This list is only for users whose type is <b>Student</b>. Interns, Work Integrated Learning and other types are listed in the <b>Other absences</b> tab. A student is flagged when they are absent for more than <b>${cfg.maxAbsent} day(s)</b> in one month. Each day above the limit takes <b>${cfg.deductPercent}%</b> off the stipend${cfg.stipend ? ` (stipend: ${money(cfg.stipend)})` : ''}. Weekdays only. Days with an approved absence report do not count. Today and future days are not counted.</p>
+    <div class="row"><div><label for="rfMonth">Month</label><input id="rfMonth" type="month" value="${esc(rfMonth)}" onchange="rfMonth = this.value || rfMonth; render()"></div></div>
+    <p><b>${flagged.length}</b> student(s) flagged this month${rows.some(r => r.waiver) ? `, ${rows.filter(r => r.waiver).length} removed by an admin` : ''}. <b>Remove flag</b> only applies to the month shown. <b>Remove from list</b> takes the student off this list for every month until you restore them.${canManageFlags() ? '' : ' You do not have the right to remove or restore flags.'}</p>
+    ${rows.length ? `<div class="wrap"><table><tr><th>Student</th><th>Status</th><th>Absent days</th><th>Excused</th><th>Days over limit</th><th>Likely deduction</th><th>Absent dates (dd/mm)</th><th></th></tr>${rows.map(line).join('')}</table></div>` : '<p>No absences found for this month.</p>'}
+    ${excludedSection()}
+    <button onclick="exportRedFlags()" ${rows.length ? '' : 'disabled'}>Download red flag list (Excel)</button>
+    ${hasPermission('redflagRules') ? `<details><summary>Red flag rules</summary>
+      <div class="row"><div><label for="rfMax">Most absent days allowed per month</label><input id="rfMax" type="number" min="0" value="${cfg.maxAbsent}"></div>
+      <div><label for="rfPct">Deduction per extra day (% of stipend)</label><input id="rfPct" type="number" min="0" max="100" step="0.5" value="${cfg.deductPercent}"></div>
+      <div><label for="rfStipend">Monthly stipend in Rand (optional, shows the amount)</label><input id="rfStipend" type="number" min="0" value="${cfg.stipend || ''}"></div></div>
+      <label for="rfOff">Days off such as public holidays (dates like 2026-10-12, separated by commas)</label><input id="rfOff" value="${esc((cfg.offDays || []).join(', '))}">
+      <button onclick="saveRedFlagRules()">Save rules</button></details>` : ''}</div>`;
+}
+function otherAbsencesCard() {
+  const rows = absenceReport(rfMonth, 'others'), cfg = rfSettings();
+  return `<div class="card"><h2>Other absences (not students)</h2>
+    <p>Interns, Work Integrated Learning and other types are listed here. They do not get a red flag. Weekdays only, with approved absences and days off left out, the same as the student list.</p>
+    <div class="row"><div><label for="rfMonthOther">Month</label><input id="rfMonthOther" type="month" value="${esc(rfMonth)}" onchange="rfMonth = this.value || rfMonth; render()"></div></div>
+    ${rows.length ? `<div class="wrap"><table><tr><th>Name</th><th>Type</th><th>Absent days</th><th>Excused</th><th>Absent dates (dd/mm)</th></tr>${rows.map(r => `<tr><td><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(r.user.sn)}">${esc(r.user.name)}</a><br><small>${esc(r.user.sn)}</small></td><td>${esc(attendanceTypeForProfile(r.user) || 'No type')}</td><td>${r.absent.length}</td><td>${r.excused.length}</td><td style="white-space:normal;min-width:180px">${r.absent.map(d => `${d.slice(8)}/${d.slice(5, 7)}`).join(', ') || '-'}</td></tr>`).join('')}</table></div>` : '<p>No absences found for this month.</p>'}</div>`;
+}
+async function removeRedFlag(sn) {
+  if (!canManageFlags()) return;
+  const u = users().find(x => x.sn === sn);
+  if (!u || !confirm(`Remove the red flag for ${u.name} for ${rfMonth}? No stipend deduction will be shown for them this month.`)) return;
+  try { await fs.collection('users').doc(sn).update({ [`redFlagWaivers.${waiverKey(rfMonth)}`]: { by: session.user, at: Date.now() } }); }
+  catch (e) { say('Could not remove the flag. Check your internet.'); }
+}
+const excludedStudents = () => users().filter(u => u.redFlagExcluded && attendanceTypeForProfile(u) === STUDENT_CATEGORY).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+function excludedSection() {
+  const list = excludedStudents();
+  if (!list.length || !canManageFlags()) return '';
+  return `<h3>Removed from the list (${list.length})</h3><div class="wrap"><table><tr><th>Student</th><th>Removed by</th><th></th></tr>${list.map(u => `<tr><td>${esc(u.name)}<br><small>${esc(u.sn)}</small></td><td>${esc(u.redFlagExcludedBy || 'admin')}</td><td><button class="sm alt" onclick="restoreToRedFlagList(this.dataset.sn)" data-sn="${esc(u.sn)}">Put back on list</button></td></tr>`).join('')}</table></div>`;
+}
+async function excludeFromRedFlags(sn) {
+  if (!canManageFlags()) return;
+  const u = users().find(x => x.sn === sn);
+  if (!u || !confirm(`Remove ${u.name} from the red flag list for all months? You can put them back later.`)) return;
+  try { await fs.collection('users').doc(sn).update({ redFlagExcluded: true, redFlagExcludedBy: session.user }); }
+  catch (e) { say('Could not remove the student. Check your internet.'); }
+}
+async function restoreToRedFlagList(sn) {
+  if (!canManageFlags()) return;
+  try { const del = firebase.firestore.FieldValue.delete(); await fs.collection('users').doc(sn).update({ redFlagExcluded: del, redFlagExcludedBy: del }); }
+  catch (e) { say('Could not put the student back. Check your internet.'); }
+}
+async function restoreRedFlag(sn) {
+  if (!canManageFlags()) return;
+  try { await fs.collection('users').doc(sn).update({ [`redFlagWaivers.${waiverKey(rfMonth)}`]: firebase.firestore.FieldValue.delete() }); }
+  catch (e) { say('Could not restore the flag. Check your internet.'); }
+}
+async function saveRedFlagRules() {
+  if (!hasPermission('redflagRules')) return;
+  const offDays = $('rfOff').value.split(/[,\s]+/).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+  const redFlag = { maxAbsent: Math.max(0, Number($('rfMax').value) || 0), deductPercent: Math.min(100, Math.max(0, Number($('rfPct').value) || 0)), stipend: Math.max(0, Number($('rfStipend').value) || 0), offDays };
+  try { await saveSettings({ ...settings(), redFlag }); C.settings.redFlag = redFlag; say('Red flag rules saved.', true); }
+  catch (e) { say('Could not save the rules. Check your internet.'); }
+}
+function exportRedFlags() {
+  const cfg = rfSettings(), rows = absenceReport(rfMonth);
+  const data = [['Student no.', 'Name', 'Status', 'Absent days', 'Excused days', 'Days over limit', 'Deduction %', 'Estimated deduction (R)', 'Absent dates']]
+    .concat(rows.map(r => [r.user.sn, r.user.name, r.flagged ? 'RED FLAG' : r.waiver ? 'FLAG REMOVED' : 'OK', r.absent.length, r.excused.length, r.over, r.flagged ? r.percent : 0, r.flagged && cfg.stipend ? Number(r.amount.toFixed(2)) : '', r.absent.join(', ')]));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Red flags');
+  XLSX.writeFile(wb, `WM-LPR-red-flags-${rfMonth}.xlsx`);
+}
+
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
   const visibleStudents = matchingStudents();
@@ -642,6 +751,8 @@ function adminView() {
     { id: 'personal-pcs', label: 'PC numbers', permission: 'settings' },
     { id: 'mark-personal', label: 'Mark personal PC', permission: 'attendance' },
     { id: 'personal-week', label: 'Personal PC this week', permission: 'attendance' },
+    { id: 'redflags', label: '&#9873; Red flags', permission: 'redflags' },
+    { id: 'otherabsences', label: 'Other absences', permission: 'redflags' },
     { id: 'students', label: 'Students', permission: 'students' },
     { id: 'staff', label: 'Staff', permission: 'staff' },
     { id: 'password', label: 'Password' },
@@ -650,13 +761,15 @@ function adminView() {
   if (!sections.some(section => section.id === adminTab)) adminTab = sections[0].id;
   const panel = id => `admin-panel${adminTab === id ? ' active' : ''}`;
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
-  const personal = records().filter(r => isP(r) && r.date >= ymd(wk) && r.date <= ymd(fri))
+  const personal = records().filter(r => isP(r) && !r.excused && r.date >= ymd(wk) && r.date <= ymd(fri))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
   <div class="admin-tabs" role="tablist" aria-label="Admin sections">${sections.map(section => `<button type="button" role="tab" aria-selected="${adminTab === section.id}" class="${adminTab === section.id ? '' : 'alt'}" onclick="setAdminTab('${section.id}')">${section.label}</button>`).join('')}</div>
   ${hasPermission('attendance') ? `<section class="${panel('register')}" role="tabpanel">${dayCard()}${adminRecordDetails()}</section>` : ''}
   ${hasPermission('attendance') ? `<section class="${panel('search')}" role="tabpanel">${attendanceSearchCard()}</section>` : ''}
+  ${hasPermission('redflags') ? `<section class="${panel('redflags')}" role="tabpanel">${adminTab === 'redflags' ? redFlagCard() : ''}</section>` : ''}
+  ${hasPermission('redflags') ? `<section class="${panel('otherabsences')}" role="tabpanel">${adminTab === 'otherabsences' ? otherAbsencesCard() : ''}</section>` : ''}
   ${hasPermission('settings') ? `<section class="${panel('settings')}" role="tabpanel"><div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div></section>` : ''}
@@ -735,7 +848,7 @@ let dayView = { date: ymd(new Date()), mode: 'all' };
 function dayCard() {
   const recs = records().filter(r => r.date === dayView.date)
     .sort((a, b) => String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
-  const pers = recs.filter(isP).length, names = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
+  const pers = recs.filter(r => isP(r) && !r.excused).length, exc = recs.filter(r => r.excused).length, names = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
   recs.forEach(r => { if (r.group && !isLegacyPersonalGroup(r.group) && !names.includes(r.group)) names.push(r.group); });
   const cnt = g => recs.filter(r => r.group === g).length, nog = recs.filter(r => (!r.group || isLegacyPersonalGroup(r.group)) && !attendanceStudentType(r)), typed = recs.filter(r => attendanceStudentType(r));
   let body;
@@ -747,7 +860,7 @@ function dayCard() {
     <div class="row"><div><label for="dd">Date</label><input id="dd" type="date" value="${dayView.date}" onchange="setDay()"></div>
     <div><label for="dm">View</label><select id="dm" onchange="setDay()"><option value="group" ${dayView.mode === 'group' ? 'selected' : ''}>By group</option><option value="all" ${dayView.mode === 'all' ? 'selected' : ''}>Whole list (with totals)</option></select></div></div>
     <button class="alt" onclick="dayToday()">Go to today</button>
-    <p><b>${dayName(dayView.date)}, ${dayView.date}</b>: ${recs.length} signed in (${recs.length - pers} lab PCs, ${pers} personal PCs).${isWeekday(parse(dayView.date)) ? '' : ' The register is closed on weekends.'}</p>
+    <p><b>${dayName(dayView.date)}, ${dayView.date}</b>: ${recs.length} signed in (${recs.length - pers - exc} lab PCs, ${pers} personal PCs${exc ? `, ${exc} excused` : ''}).${isWeekday(parse(dayView.date)) ? '' : ' The register is closed on weekends.'}</p>
     ${body}</div>`;
 }
 function setDay() { dayView.date = $('dd').value || ymd(new Date()); dayView.mode = $('dm').value; render(); }
@@ -990,9 +1103,9 @@ async function saveStaffPermissions(button) {
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
   if (admin) return `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>Group / type</th><th>PC</th><th>Status</th><th></th></tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? `Returned${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
+    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? `Returned${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? noPcText(r) : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? `${esc(new Date(r.returnedAt).toLocaleString())}${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? `${esc(new Date(r.returnedAt).toLocaleString())}${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? noPcText(r) : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
       (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function returnPc(id) {
@@ -1111,7 +1224,8 @@ function adminReports() {
   const list = [...liveReports()].sort((a, b) => b.created - a.created);
   const files = studentSubmittedFiles().filter(file => hasPermission('updates') || file.kind === 'Absence report');
   $('app').innerHTML = `<div class="msg err">${msg}</div><div class="card"><h2>Absence reports</h2>
-    <p>Reports disappear by themselves 7 days after they are sent. Approve or reject each one based on the reason.</p>
+    <p>Reports disappear by themselves 7 days after they are sent. Approve or reject each one based on the reason. An approved report marks the student as attended in the register for that date.</p>
+    <button class="alt" onclick="addApprovedToRegister()">Add reports approved earlier to the register</button>
     ${list.length ? list.map(r => reportCard(r, true)).join('') : '<p>No reports.</p>'}</div>
     <div class="card"><h2>Files submitted by students</h2>
       <p>${files.length} file(s), including absence-report documents and ZIP replies.</p>
@@ -1285,6 +1399,25 @@ async function decide(id, status) {
   const note = prompt(status === 'approved' ? 'Note for the student (optional):' : 'Why is it rejected? (optional note for the student):', '');
   if (note === null) return;
   await fs.collection('reports').doc(id).update({ status, note: note.trim(), decidedBy: session.user });
+  const report = C.reports.find(x => x.id === id);
+  if (report) { try { await syncExcusedAttendance(report, status); } catch (e) { say('The report was saved, but the register could not be updated. Check your internet and press the button again.'); } }
+}
+// An approved report puts the student in the register as attended (with signature, group and type). Rejecting it removes that entry.
+async function syncExcusedAttendance(report, status) {
+  const recId = `${report.date}_excused_${report.sn}`, ref = fs.collection('records').doc(recId);
+  if (status !== 'approved') { await ref.delete(); return; }
+  if (records().some(r => r.date === report.date && r.sn === report.sn && !r.excused)) return; // already signed in that day
+  const u = users().find(x => x.sn === report.sn) || {}, studentType = attendanceTypeForProfile(u) || '';
+  const group = studentType === STUDENT_CATEGORY && u.group && !isLegacyPersonalGroup(u.group) ? u.group : '';
+  await ref.set({ id: recId, date: report.date, sn: report.sn, name: u.name || report.name, group, groupYear: groupYearFor(group), studentType,
+    signature: u.signature || '', signedAt: Date.now(), pc: 'Excused', personal: false, excused: true, time: 'Approved report',
+    reportId: report.id, reportType: report.type || '', reason: report.reason || '', approvedBy: session.user });
+}
+async function addApprovedToRegister() {
+  if (!hasPermission('reports')) return;
+  const list = liveReports().filter(r => r.status === 'approved');
+  try { for (const r of list) await syncExcusedAttendance(r, 'approved'); say(`${list.length} approved report(s) checked and added to the register.`, true); }
+  catch (e) { say('Could not update the register. Check your internet.'); }
 }
 async function delReport(id) {
   if (!hasPermission('reports') || !confirm('Delete this report?')) return;
@@ -1296,10 +1429,10 @@ function reportName() {
   if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `WM-LPR-week-${ymd(m)}-to-${ymd(f)}`; }
   return `WM-LPR-month-${range.value.slice(0, 7)}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? 'Personal PC' : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? noPcText(r) : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
 const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at / staff', 'Signature'];
 function pcListSummary(list) {
-  const assigned = list.filter(record => hasRecordedPc(record.pc));
+  const assigned = list.filter(record => hasRecordedPc(record.pc) && !record.excused);
   const labAssignments = assigned.filter(record => !isP(record));
   const uniqueLabPcs = new Set(labAssignments.map(record => String(record.pc))).size;
   const personalAssignments = assigned.length - labAssignments.length;
@@ -1500,7 +1633,7 @@ function exportGroupPdf() {
   doc.setFontSize(9); doc.text(pcListSummary(groupRows), 14, 27);
   doc.autoTable({
     head: [['Date', 'Day', 'Student no.', 'Name', 'PC', 'Signed in', 'Returned at', 'Signature']],
-    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? 'Personal PC' : 'Not returned'), '']),
+    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? noPcText(r) : 'Not returned'), '']),
     startY: 33,
     styles: { fontSize: 8, minCellHeight: 18 },
     columnStyles: { 7: { cellWidth: 40 } },
