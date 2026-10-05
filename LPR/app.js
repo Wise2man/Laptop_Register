@@ -377,7 +377,7 @@ function attendanceSearchCard() {
     <div><label for="attendancePc">PC number</label><input id="attendancePc" value="${esc(f.pc)}" inputmode="numeric" placeholder="Any PC"></div>
     <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option></select></div></div>
     <button onclick="applyAttendanceFilters()">Search</button><button class="alt" onclick="clearAttendanceFilters()">Clear</button>
-    <p>${list.length} match(es)${list.length > display.length ? `; showing the latest ${display.length}` : ''}.</p><div class="wrap">${table(display, true)}</div></div>`;
+    <p>${list.length} match(es)${list.length > display.length ? `; showing the latest ${display.length}` : ''}.</p>${table(display, true)}</div>`;
 }
 function applyAttendanceFilters() {
   attendanceFilters = { query: $('attendanceQuery').value, from: $('attendanceFrom').value, to: $('attendanceTo').value, group: $('attendanceGroup').value, type: $('attendanceType').value, pc: $('attendancePc').value.trim(), status: $('attendanceStatus').value };
@@ -756,8 +756,8 @@ async function saveStaffPermissions(button) {
 }
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
-  if (admin) return `<table><tr><th>Date</th><th>Student</th><th>Group / type</th><th>PC</th><th>Status</th><th></th></tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? 'Returned' : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table>';
+  if (admin) return `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>Group / type</th><th>PC</th><th>Status</th><th></th></tr>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? 'Returned' : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
     list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? new Date(r.returnedAt).toLocaleString() : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
       (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
