@@ -109,6 +109,11 @@ function render() {
     ? `${esc(session.name)} (${session.role}) <button class="alt sm" style="color:#fff;border-color:#fff" onclick="logout()">Log out</button>` : '';
   $('nav').innerHTML = '';
   if (!session) return authView();
+  const signedInAccount = session.role === 'student' ? studentProfile() : settings().admins.find(account => account.user === session.user);
+  if (session.mustChangePassword || signedInAccount && signedInAccount.mustChangePassword) {
+    session.mustChangePassword = true; keepSession();
+    return forcedPasswordView();
+  }
   if (session.role === 'student' && !studentProfile().signature) return signatureSetupView();
   const staff = isStaff(), n = liveReports().filter(r => r.status === 'pending').length;
   $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${staff ? 'Admin' : 'Register'}</a>` +
@@ -212,13 +217,40 @@ async function login() {
   const raw = $('s').value.trim(), p = $('p').value, ad = findAdmin(raw);
   if (ad) {
     if (ad.pw !== await hash(ad.user + ':' + p)) return say('Wrong admin password.');
-    session = { role: ad.role === 'staff' ? 'staff' : 'admin', name: ad.user, user: ad.user };
+    session = { role: ad.role === 'staff' ? 'staff' : 'admin', name: ad.user, user: ad.user, mustChangePassword: Boolean(ad.mustChangePassword) };
   } else {
     const sn = raw.toUpperCase(), u = users().find(x => x.sn === sn);
     if (!u || u.pw !== await hash(sn + ':' + p)) return say('Wrong username or password.');
-    session = { role: 'student', sn, name: u.name };
+    session = { role: 'student', sn, name: u.name, mustChangePassword: Boolean(u.mustChangePassword) };
   }
   myGroup = ''; myStudentType = ''; signatureMessage = ''; keepSession(); msg = ''; render();
+}
+function forcedPasswordView() {
+  $('nav').innerHTML = '';
+  $('app').innerHTML = `<div class="card"><h2>Create a new password</h2>
+    <p>Your administrator reset your password. Choose a new one to continue.</p>
+    <label for="requiredPassword">New password (at least 6 characters)</label><input id="requiredPassword" type="password" autocomplete="new-password">
+    <label for="requiredPasswordAgain">Type it again</label><input id="requiredPasswordAgain" type="password" autocomplete="new-password">
+    <button onclick="completeForcedPasswordChange()">Save new password</button><div id="passwordError" class="msg err">${esc(msg)}</div></div>`;
+}
+async function completeForcedPasswordChange() {
+  if (!session || !session.mustChangePassword) return;
+  const password = $('requiredPassword').value, confirmation = $('requiredPasswordAgain').value;
+  if (password.length < 6) { $('passwordError').textContent = 'Password must have at least 6 characters.'; return; }
+  if (password !== confirmation) { $('passwordError').textContent = 'The passwords do not match.'; return; }
+  try {
+    const pw = await hash(`${session.sn || session.user}:${password}`);
+    if (session.role === 'student') {
+      await fs.collection('users').doc(session.sn).update({ pw, mustChangePassword: false });
+      const student = users().find(u => u.sn === session.sn);
+      if (student) { student.pw = pw; student.mustChangePassword = false; }
+    } else {
+      const admins = settings().admins.map(account => account.user === session.user ? { ...account, pw, mustChangePassword: false } : account);
+      const updatedSettings = { ...settings(), admins };
+      await saveSettings(updatedSettings); C.settings = updatedSettings;
+    }
+    session.mustChangePassword = false; keepSession(); msg = ''; render();
+  } catch (e) { $('passwordError').textContent = 'Could not save the new password. Check your connection and try again.'; }
 }
 async function setupAdmin() {
   if (settings().admins.length) return say('An admin already exists. Please log in.');
@@ -341,7 +373,7 @@ async function sign() {
 
 /* ---------- Admin ---------- */
 let range = { type: 'week', value: ymd(new Date()) };
-let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', adminTab = 'attendance';
+let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', selectedStaffUser = '', adminTab = 'register';
 function inRange() {
   let list = records();
   if (range.type === 'week') {
@@ -389,7 +421,7 @@ function clearAttendanceFilters() {
 }
 function viewRecord(id) {
   selectedRecordId = id;
-  adminTab = 'attendance';
+  adminTab = 'register';
   render();
   $('recordDetails')?.scrollIntoView({ block: 'nearest' });
 }
@@ -404,6 +436,13 @@ function viewGroup(group) {
   adminTab = 'groups';
   render();
   $('groupDetails')?.scrollIntoView({ block: 'nearest' });
+}
+function viewStaff(user) {
+  if (!hasPermission('staff')) return;
+  selectedStaffUser = user;
+  adminTab = 'staff';
+  render();
+  $('staffDetails')?.scrollIntoView({ block: 'nearest' });
 }
 function adminGroupDetails() {
   const groups = settings().groups || [], i = groups.indexOf(selectedGroup);
@@ -445,15 +484,31 @@ function adminStudentDetails() {
     <button class="sm alt" onclick="deleteStudent('${esc(user.sn)}')">Delete login and profile</button>
     <button class="sm alt" onclick="selectedStudentSn = ''; render()">Close details</button></div>`;
 }
+function adminStaffDetails() {
+  const account = settings().admins.find(item => item.user === selectedStaffUser);
+  if (!account) return '';
+  const fullAdmin = account.role !== 'staff';
+  return `<div class="card" id="staffDetails"><h3>${esc(account.user)}</h3>
+    <p>${fullAdmin ? 'Full admin · all rights' : `Staff · ${(account.permissions || []).map(key => esc(PERMISSIONS[key] || key)).join(', ') || 'No rights granted'}`}</p>
+    ${account.user !== session.user ? `<button class="sm" onclick="resetStaffPassword(this.dataset.user)" data-user="${esc(account.user)}">Reset password</button>` : '<p>This is your account. Use the Password tab to change your own password.</p>'}
+    ${account.role === 'staff' && account.user !== session.user ? `<button class="sm alt" onclick="removeStaff(this.dataset.user)" data-user="${esc(account.user)}">Remove staff account</button>` : ''}
+    <button class="sm alt" onclick="selectedStaffUser = ''; render()">Close details</button></div>`;
+}
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
   const sections = [
-    { id: 'attendance', label: 'Attendance', permission: 'attendance' },
-    { id: 'settings', label: 'Settings', permission: 'settings' },
+    { id: 'register', label: 'Today', permission: 'attendance' },
+    { id: 'search', label: 'Search attendance', permission: 'attendance' },
+    { id: 'settings', label: 'PC settings', permission: 'settings' },
+    { id: 'location', label: 'Lab location', permission: 'settings' },
     { id: 'groups', label: 'Groups', permission: 'groups' },
-    { id: 'pc-tools', label: 'Personal PC', permission: 'attendance' },
+    { id: 'student-types', label: 'Student types', permission: 'groups' },
+    { id: 'personal-pcs', label: 'PC numbers', permission: 'settings' },
+    { id: 'mark-personal', label: 'Mark personal PC', permission: 'attendance' },
+    { id: 'personal-week', label: 'Personal PC this week', permission: 'attendance' },
     { id: 'students', label: 'Students', permission: 'students' },
-    { id: 'staff', label: 'Staff & account' },
+    { id: 'staff', label: 'Staff', permission: 'staff' },
+    { id: 'password', label: 'Password' },
     { id: 'exports', label: 'Exports', permission: 'attendance' }
   ].filter(section => !section.permission || hasPermission(section.permission));
   if (!sections.some(section => section.id === adminTab)) adminTab = sections[0].id;
@@ -464,11 +519,12 @@ function adminView() {
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
   <div class="admin-tabs" role="tablist" aria-label="Admin sections">${sections.map(section => `<button type="button" role="tab" aria-selected="${adminTab === section.id}" class="${adminTab === section.id ? '' : 'alt'}" onclick="setAdminTab('${section.id}')">${section.label}</button>`).join('')}</div>
-  ${hasPermission('attendance') ? `<section class="${panel('attendance')}" role="tabpanel">${dayCard()}${attendanceSearchCard()}${adminRecordDetails()}</section>` : ''}
+  ${hasPermission('attendance') ? `<section class="${panel('register')}" role="tabpanel">${dayCard()}${adminRecordDetails()}</section>` : ''}
+  ${hasPermission('attendance') ? `<section class="${panel('search')}" role="tabpanel">${attendanceSearchCard()}</section>` : ''}
   ${hasPermission('settings') ? `<section class="${panel('settings')}" role="tabpanel"><div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
-    <button onclick="saveTotal()">Save number of PCs</button></div>
-  <div class="card"><h2>Lab location</h2>
+    <button onclick="saveTotal()">Save number of PCs</button></div></section>` : ''}
+  ${hasPermission('settings') ? `<section class="${panel('location')}" role="tabpanel"><div class="card"><h2>Lab location</h2>
     <p>${st.lab ? `Saved: ${st.lab.lat.toFixed(5)}, ${st.lab.lng.toFixed(5)}. Students must be within ${st.lab.radius} m.` : '<span class="err">Not set yet. Students cannot sign until you set it.</span>'}</p>
     <p>Stand in the lab with this device and click the button. A phone with GPS is more exact than a desktop PC.</p>
     <div class="row"><div><label for="rad">Allowed distance in metres</label><input id="rad" type="number" min="20" value="${st.lab ? st.lab.radius : 100}"></div></div>
@@ -479,34 +535,35 @@ function adminView() {
     ${(st.groups || []).some(isLegacyPersonalGroup) ? `<p>“${LEGACY_PERSONAL_GROUP}” is treated as a student type category, not a group.</p><button class="sm alt" onclick="removeLegacyPersonalGroup()">Remove legacy group entry</button>` : ''}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
-  ${adminGroupDetails()}
+  ${adminGroupDetails()}</section>` : ''}
+  ${hasPermission('groups') ? `<section class="${panel('student-types')}" role="tabpanel">
   <div class="card"><h2>Student types</h2><p>For students formerly listed under ${LEGACY_PERSONAL_GROUP}; these are separate from groups.</p>
     <div class="wrap"><table>${studentTypes().map((type, i) => `<tr><td>${esc(type)}</td><td>${users().filter(u => u.studentType === type).length} students</td><td><button class="sm alt" onclick="removeStudentType(${i})">Remove</button></td></tr>`).join('')}</table></div>
     <label for="newStudentType">New student type</label><input id="newStudentType" maxlength="50">
     <button onclick="addStudentType()">Add student type</button></div></section>` : ''}
-  ${hasPermission('settings') ? `<section class="${panel('settings')}" role="tabpanel"><div class="card"><h2>Personal PC numbers</h2>
+  ${hasPermission('settings') ? `<section class="${panel('personal-pcs')}" role="tabpanel"><div class="card"><h2>Personal PC numbers</h2>
     <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
     ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
     <div class="row"><div><label for="pnc">How many numbers to add</label><input id="pnc" type="number" min="1" max="50" value="5"></div>
     <div><label for="pnn">Or one exact number (200 or more)</label><input id="pnn" type="number" min="200"></div></div>
     <button onclick="addPersonalNums()">Add numbers</button></div></section>` : ''}
-  ${hasPermission('attendance') ? `<section class="${panel('pc-tools')}" role="tabpanel"><div class="card"><h2>Personal PC</h2>
+  ${hasPermission('attendance') ? `<section class="${panel('mark-personal')}" role="tabpanel"><div class="card"><h2>Mark personal PC</h2>
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
     <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div>
     <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
-    <button onclick="markPersonal()">Mark as personal PC</button>
-    <h2 style="margin-top:20px">Using a personal PC this week</h2>
+    <button onclick="markPersonal()">Mark as personal PC</button></div></section>` : ''}
+  ${hasPermission('attendance') ? `<section class="${panel('personal-week')}" role="tabpanel"><div class="card"><h2>Using a personal PC this week</h2>
     ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>PC</th><th></th></tr>${personal.map(r =>
         `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${pcLabel(r)}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div></section>` : ''}
-      <section class="${panel('staff')}" role="tabpanel">
-      ${hasPermission('staff') ? `<div class="card"><h2>Staff roles</h2>
-    <ul class="link-list">${st.admins.map(a => `<li data-user="${esc(a.user)}"><span><b>${esc(a.user)}</b> · ${a.role === 'staff' ? 'Staff' : 'Full admin'}</span><span>${a.role === 'staff' ? (a.permissions || []).map(key => esc(PERMISSIONS[key] || key)).join(', ') || 'No rights granted' : 'All rights'}${a.role === 'staff' && a.user !== session.user ? `<details><summary>Edit rights</summary>${Object.entries(PERMISSIONS).map(([key, label]) => `<label class="check"><input type="checkbox" name="editStaffPermission" value="${key}" ${(a.permissions || []).includes(key) ? 'checked' : ''}>${label}</label>`).join('')}<button class="sm" onclick="saveStaffPermissions(this)">Save rights</button></details><button class="sm alt" onclick="removeStaff('${esc(a.user)}')">Remove</button>` : ''}</span></li>`).join('')}</ul>
+      ${hasPermission('staff') ? `<section class="${panel('staff')}" role="tabpanel"><div class="card"><h2>Staff roles</h2>
+    <ul class="link-list">${st.admins.map(a => `<li data-user="${esc(a.user)}"><span><a href="#staffDetails" onclick="viewStaff(this.dataset.user); return false" data-user="${esc(a.user)}"><b>${esc(a.user)}</b></a> · ${a.role === 'staff' ? 'Staff' : 'Full admin'}</span><span>${a.role === 'staff' ? (a.permissions || []).map(key => esc(PERMISSIONS[key] || key)).join(', ') || 'No rights granted' : 'All rights'}${a.role === 'staff' && a.user !== session.user ? `<details><summary>Edit rights</summary>${Object.entries(PERMISSIONS).map(([key, label]) => `<label class="check"><input type="checkbox" name="editStaffPermission" value="${key}" ${(a.permissions || []).includes(key) ? 'checked' : ''}>${label}</label>`).join('')}<button class="sm" onclick="saveStaffPermissions(this)">Save rights</button></details>` : ''}</span></li>`).join('')}</ul>
+    ${adminStaffDetails()}
     <div class="row"><div><label for="staffUser">Username</label><input id="staffUser" autocapitalize="off"></div><div><label for="staffPassword">Temporary password (at least 6 characters)</label><input id="staffPassword" type="password"></div></div>
     <fieldset><legend>Granted rights</legend>${Object.entries(PERMISSIONS).filter(([key]) => key !== 'staff' || hasPermission('staff')).map(([key, label]) => `<label class="check"><input type="checkbox" name="staffPermission" value="${key}">${label}</label>`).join('')}</fieldset>
-    <button onclick="addAdmin()">Add staff account</button></div>` : ''}
-  <div class="card"><h2>Change my password</h2>
+    <button onclick="addAdmin()">Add staff account</button></div></section>` : ''}
+  <section class="${panel('password')}" role="tabpanel"><div class="card"><h2>Change my password</h2>
     <div class="row"><div><label for="np">New password (at least 6 characters)</label><input id="np" type="password"></div>
     <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
     <button onclick="changeAdminPw()">Change password</button></div></section>
@@ -528,7 +585,7 @@ function adminView() {
     <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div></section>` : ''}`;
 }
   function setAdminTab(tabId) { adminTab = tabId; render(); }
-let dayView = { date: ymd(new Date()), mode: 'group' };
+let dayView = { date: ymd(new Date()), mode: 'all' };
 function dayCard() {
   const recs = records().filter(r => r.date === dayView.date)
     .sort((a, b) => String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
@@ -548,7 +605,7 @@ function dayCard() {
     ${body}</div>`;
 }
 function setDay() { dayView.date = $('dd').value || ymd(new Date()); dayView.mode = $('dm').value; render(); }
-function dayToday() { dayView.date = ymd(new Date()); render(); }
+function dayToday() { dayView.date = ymd(new Date()); dayView.mode = 'all'; render(); }
 function setRange() {
   range.type = $('rt').value;
   const v = $('rv').value;
@@ -719,13 +776,37 @@ async function changeAdminPw() {
   const me = admins.find(x => x.user === session.user); me.pw = await hash(me.user + ':' + a);
   await saveSettings({ ...st, admins }); say('Admin password changed.', true);
 }
+function temporaryPassword() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  return Array.from(crypto.getRandomValues(new Uint8Array(14)), value => alphabet[value % alphabet.length]).join('');
+}
 async function resetStudent(i) {
   if (!hasPermission('students')) return;
-  const x = users()[i];
-  const v = prompt(`Type a new password for ${x.name} (${x.sn}), at least 6 characters. Then give it to the student:`);
-  if (v === null) return;
-  if (v.length < 6) return say('Password must have at least 6 characters.');
-  await fs.collection('users').doc(x.sn).update({ pw: await hash(x.sn + ':' + v) }); say(`Password reset for ${esc(x.name)}.`, true);
+  const student = users()[i];
+  if (!student || !confirm(`Reset ${student.name}'s password? They will need to create a new password at next login.`)) return;
+  const temporary = temporaryPassword();
+  try {
+    await fs.collection('users').doc(student.sn).update({ pw: await hash(student.sn + ':' + temporary), mustChangePassword: true });
+    student.pw = await hash(student.sn + ':' + temporary); student.mustChangePassword = true;
+    alert(`Temporary password for ${student.name}: ${temporary}\nGive it to them privately. They will be asked to create a new password when they log in.`);
+    say(`Password reset for ${esc(student.name)}.`, true);
+  } catch (e) { say('Could not reset the student password.'); }
+}
+async function resetStaffPassword(user) {
+  if (!hasPermission('staff')) return;
+  const target = settings().admins.find(account => account.user === user);
+  if (!target || user === session.user || !confirm(`Reset ${user}'s password? They will need to create a new password at next login.`)) return;
+  const temporary = temporaryPassword();
+  try {
+    const pw = await hash(user + ':' + temporary);
+    const admins = settings().admins.map(account => account.user === user
+      ? { ...account, pw, mustChangePassword: true }
+      : account);
+    const updatedSettings = { ...settings(), admins };
+    await saveSettings(updatedSettings); C.settings = updatedSettings;
+    alert(`Temporary password for ${user}: ${temporary}\nGive it to them privately. They will be asked to create a new password when they log in.`);
+    say(`Password reset for ${esc(user)}.`, true);
+  } catch (e) { say('Could not reset the staff password.'); }
 }
 async function deleteStudent(sn) {
   if (!hasPermission('students')) return;

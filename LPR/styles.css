@@ -52,8 +52,8 @@ details{margin:8px 0}
 summary{cursor:pointer;color:var(--acc);font-weight:700}
 input,select,textarea{border-radius:5px}
 .signature-pad{border-radius:5px}
-.admin-tabs{position:sticky;top:0;z-index:4;display:flex;gap:6px;overflow-x:auto;background:var(--bg);padding:10px 0;margin:0 0 14px;border-bottom:1px solid var(--line);scrollbar-width:thin}
-.admin-tabs button{flex:0 0 auto;margin:0;padding:9px 14px;border-radius:5px;white-space:nowrap}
+.admin-tabs{position:sticky;top:0;z-index:4;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;background:var(--bg);padding:10px 0;margin:0 0 14px;border-bottom:1px solid var(--line)}
+.admin-tabs button{width:100%;min-width:0;min-height:52px;margin:0;padding:7px 5px;border-radius:5px;white-space:normal;line-height:1.2;text-align:center;overflow-wrap:anywhere}
 .admin-tabs button[aria-selected="true"]{background:var(--acc-dark);color:#fff;border-color:var(--acc-dark)}
 .admin-panel{display:none;min-width:0;overflow-x:clip}
 .admin-panel.active{display:block;animation:panel-in .16s ease-out both}
