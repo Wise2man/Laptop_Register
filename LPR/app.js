@@ -341,7 +341,7 @@ async function sign() {
 
 /* ---------- Admin ---------- */
 let range = { type: 'week', value: ymd(new Date()) };
-let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '';
+let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', adminTab = 'attendance';
 function inRange() {
   let list = records();
   if (range.type === 'week') {
@@ -389,16 +389,19 @@ function clearAttendanceFilters() {
 }
 function viewRecord(id) {
   selectedRecordId = id;
+  adminTab = 'attendance';
   render();
   $('recordDetails')?.scrollIntoView({ block: 'nearest' });
 }
 function viewStudent(sn) {
   selectedStudentSn = sn;
+  adminTab = 'students';
   render();
   $('studentDetails')?.scrollIntoView({ block: 'nearest' });
 }
 function viewGroup(group) {
   selectedGroup = group;
+  adminTab = 'groups';
   render();
   $('groupDetails')?.scrollIntoView({ block: 'nearest' });
 }
@@ -444,13 +447,25 @@ function adminStudentDetails() {
 }
 function adminView() {
   const list = inRange(), st = settings(), groups = (st.groups || []).filter(g => !isLegacyPersonalGroup(g));
+  const sections = [
+    { id: 'attendance', label: 'Attendance', permission: 'attendance' },
+    { id: 'settings', label: 'Settings', permission: 'settings' },
+    { id: 'groups', label: 'Groups', permission: 'groups' },
+    { id: 'pc-tools', label: 'Personal PC', permission: 'attendance' },
+    { id: 'students', label: 'Students', permission: 'students' },
+    { id: 'staff', label: 'Staff & account' },
+    { id: 'exports', label: 'Exports', permission: 'attendance' }
+  ].filter(section => !section.permission || hasPermission(section.permission));
+  if (!sections.some(section => section.id === adminTab)) adminTab = sections[0].id;
+  const panel = id => `admin-panel${adminTab === id ? ' active' : ''}`;
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
   const personal = records().filter(r => isP(r) && r.date >= ymd(wk) && r.date <= ymd(fri))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
   <div class="msg err">${msg}</div>
-  ${hasPermission('attendance') ? `${dayCard()}${attendanceSearchCard()}${adminRecordDetails()}` : ''}
-  ${hasPermission('settings') ? `<div class="card"><h2>Settings</h2>
+  <div class="admin-tabs" role="tablist" aria-label="Admin sections">${sections.map(section => `<button type="button" role="tab" aria-selected="${adminTab === section.id}" class="${adminTab === section.id ? '' : 'alt'}" onclick="setAdminTab('${section.id}')">${section.label}</button>`).join('')}</div>
+  ${hasPermission('attendance') ? `<section class="${panel('attendance')}" role="tabpanel">${dayCard()}${attendanceSearchCard()}${adminRecordDetails()}</section>` : ''}
+  ${hasPermission('settings') ? `<section class="${panel('settings')}" role="tabpanel"><div class="card"><h2>Settings</h2>
     <div class="row"><div><label for="tp">Number of PCs</label><input id="tp" type="number" min="1" value="${st.totalPCs}"></div></div>
     <button onclick="saveTotal()">Save number of PCs</button></div>
   <div class="card"><h2>Lab location</h2>
@@ -458,8 +473,8 @@ function adminView() {
     <p>Stand in the lab with this device and click the button. A phone with GPS is more exact than a desktop PC.</p>
     <div class="row"><div><label for="rad">Allowed distance in metres</label><input id="rad" type="number" min="20" value="${st.lab ? st.lab.radius : 100}"></div></div>
     <button onclick="setLab()">Use this device's location as the lab</button>
-    ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div>` : ''}
-  ${hasPermission('groups') ? `<div class="card"><h2>Groups</h2>
+    ${st.lab ? '<button class="alt" onclick="saveRadius()">Save distance only</button>' : ''}</div></section>` : ''}
+  ${hasPermission('groups') ? `<section class="${panel('groups')}" role="tabpanel"><div class="card"><h2>Groups</h2>
     ${groups.length ? `<ul class="link-list">${groups.map(g => `<li><a href="#groupDetails" onclick="viewGroup(this.dataset.group); return false" data-group="${esc(g)}">${esc(groupLabel(g))}</a><span>${users().filter(u => u.group === g).length} students</span></li>`).join('')}</ul>` : '<p class="err">No groups yet. Students cannot sign until you add one.</p>'}
     ${(st.groups || []).some(isLegacyPersonalGroup) ? `<p>“${LEGACY_PERSONAL_GROUP}” is treated as a student type category, not a group.</p><button class="sm alt" onclick="removeLegacyPersonalGroup()">Remove legacy group entry</button>` : ''}
     <label for="gn">New group name</label><input id="gn">
@@ -468,14 +483,14 @@ function adminView() {
   <div class="card"><h2>Student types</h2><p>For students formerly listed under ${LEGACY_PERSONAL_GROUP}; these are separate from groups.</p>
     <div class="wrap"><table>${studentTypes().map((type, i) => `<tr><td>${esc(type)}</td><td>${users().filter(u => u.studentType === type).length} students</td><td><button class="sm alt" onclick="removeStudentType(${i})">Remove</button></td></tr>`).join('')}</table></div>
     <label for="newStudentType">New student type</label><input id="newStudentType" maxlength="50">
-    <button onclick="addStudentType()">Add student type</button></div>` : ''}
-  ${hasPermission('settings') ? `<div class="card"><h2>Personal PC numbers</h2>
+    <button onclick="addStudentType()">Add student type</button></div></section>` : ''}
+  ${hasPermission('settings') ? `<section class="${panel('settings')}" role="tabpanel"><div class="card"><h2>Personal PC numbers</h2>
     <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
     ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
     <div class="row"><div><label for="pnc">How many numbers to add</label><input id="pnc" type="number" min="1" max="50" value="5"></div>
     <div><label for="pnn">Or one exact number (200 or more)</label><input id="pnn" type="number" min="200"></div></div>
-    <button onclick="addPersonalNums()">Add numbers</button></div>` : ''}
-  ${hasPermission('attendance') ? `<div class="card"><h2>Personal PC</h2>
+    <button onclick="addPersonalNums()">Add numbers</button></div></section>` : ''}
+  ${hasPermission('attendance') ? `<section class="${panel('pc-tools')}" role="tabpanel"><div class="card"><h2>Personal PC</h2>
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
@@ -484,8 +499,9 @@ function adminView() {
     <button onclick="markPersonal()">Mark as personal PC</button>
     <h2 style="margin-top:20px">Using a personal PC this week</h2>
     ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>PC</th><th></th></tr>${personal.map(r =>
-      `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${pcLabel(r)}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div>` : ''}
-  ${hasPermission('staff') ? `<div class="card"><h2>Staff roles</h2>
+        `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${pcLabel(r)}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('')}</table></div>` : '<p>Nobody is marked this week.</p>'}</div></section>` : ''}
+      <section class="${panel('staff')}" role="tabpanel">
+      ${hasPermission('staff') ? `<div class="card"><h2>Staff roles</h2>
     <ul class="link-list">${st.admins.map(a => `<li data-user="${esc(a.user)}"><span><b>${esc(a.user)}</b> · ${a.role === 'staff' ? 'Staff' : 'Full admin'}</span><span>${a.role === 'staff' ? (a.permissions || []).map(key => esc(PERMISSIONS[key] || key)).join(', ') || 'No rights granted' : 'All rights'}${a.role === 'staff' && a.user !== session.user ? `<details><summary>Edit rights</summary>${Object.entries(PERMISSIONS).map(([key, label]) => `<label class="check"><input type="checkbox" name="editStaffPermission" value="${key}" ${(a.permissions || []).includes(key) ? 'checked' : ''}>${label}</label>`).join('')}<button class="sm" onclick="saveStaffPermissions(this)">Save rights</button></details><button class="sm alt" onclick="removeStaff('${esc(a.user)}')">Remove</button>` : ''}</span></li>`).join('')}</ul>
     <div class="row"><div><label for="staffUser">Username</label><input id="staffUser" autocapitalize="off"></div><div><label for="staffPassword">Temporary password (at least 6 characters)</label><input id="staffPassword" type="password"></div></div>
     <fieldset><legend>Granted rights</legend>${Object.entries(PERMISSIONS).filter(([key]) => key !== 'staff' || hasPermission('staff')).map(([key, label]) => `<label class="check"><input type="checkbox" name="staffPermission" value="${key}">${label}</label>`).join('')}</fieldset>
@@ -493,11 +509,11 @@ function adminView() {
   <div class="card"><h2>Change my password</h2>
     <div class="row"><div><label for="np">New password (at least 6 characters)</label><input id="np" type="password"></div>
     <div><label for="np2">Type it again</label><input id="np2" type="password"></div></div>
-    <button onclick="changeAdminPw()">Change password</button></div>
-  ${hasPermission('students') ? `<div class="card"><h2>Students</h2>
+    <button onclick="changeAdminPw()">Change password</button></div></section>
+  ${hasPermission('students') ? `<section class="${panel('students')}" role="tabpanel"><div class="card"><h2>Students</h2>
     <p>Assign regular groups or, for Lab Personal PC students, a separate student type.</p>
-    ${users().length ? `<ul>${users().map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students have signed up yet.</p>'}</div>` : ''}
-  ${hasPermission('attendance') ? `<div class="card"><h2>Reports</h2>
+    ${users().length ? `<ul>${users().map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students have signed up yet.</p>'}</div></section>` : ''}
+  ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel"><div class="card"><h2>Exports</h2>
     <div class="row">
       <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
         <option value="week" ${range.type === 'week' ? 'selected' : ''}>Week (Mon to Fri)</option>
@@ -509,8 +525,9 @@ function adminView() {
     <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p>
     <h3>Group attendance register</h3>
     <div class="row"><div><label for="groupExport">Group</label><select id="groupExport">${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div></div>
-    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div>` : ''}`;
+    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group register PDF</button></div></section>` : ''}`;
 }
+  function setAdminTab(tabId) { adminTab = tabId; render(); }
 let dayView = { date: ymd(new Date()), mode: 'group' };
 function dayCard() {
   const recs = records().filter(r => r.date === dayView.date)
