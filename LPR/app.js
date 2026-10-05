@@ -276,7 +276,7 @@ const getPos = () => new Promise((ok, no) => {
 const geoMsg = e => e.code === 1 ? 'Location is blocked. Allow location for this page in your browser settings, then try again.'
   : e.code === 3 ? 'Finding your location took too long. Go near a window, switch on GPS, and try again.'
   : 'Could not find your location. Switch on location and try again.';
-let busy = false, myGroup = '', myStudentType = '';
+let busy = false, myGroup = '', myStudentType = '', myPersonalStudentType = '';
 const studentProfile = () => users().find(u => u.sn === session.sn) || {};
 const assignedGroup = () => studentProfile().group || '';
 const groupLocked = () => Boolean(studentProfile().group || studentProfile().groupLocked);
@@ -326,10 +326,11 @@ function studentView() {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
     const pcells = personalNums().map(n => `<button class="pc ${pick === n ? 'sel' : ''}" ${taken(today, n) ? 'disabled' : ''} onclick="choose(${n})">${n}</button>`).join('');
-    const profileCategory = attendanceTypeForProfile(profile), category = profileCategory || myStudentType;
-    const categoryControl = profileCategory
+    const personalPick = personalNums().includes(pick);
+    const profileCategory = attendanceTypeForProfile(profile), category = personalPick ? myPersonalStudentType : profileCategory || myStudentType;
+    const categoryControl = profileCategory && !personalPick
       ? `<p>Your student type: <b>${esc(profileCategory)}</b> (ask an admin to change it)</p>`
-      : `<label for="studentType">Student type</label><select id="studentType" onchange="myStudentType=this.value; render()"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}" ${type === category ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select>`;
+      : `<label for="studentType">${personalPick ? 'Student type for this personal PC sign-in' : 'Student type'}</label><select id="studentType" onchange="${personalPick ? 'myPersonalStudentType' : 'myStudentType'}=this.value; render()"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}" ${type === category ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select>`;
     const groupControl = category === STUDENT_CATEGORY
       ? assignedGroup() ? `<p>Your group: <b>${esc(groupLabel(assignedGroup()))}</b> (ask an admin to change it)</p>`
         : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>'
@@ -346,12 +347,14 @@ function studentView() {
   <div class="card"><h2>${dayName(today)}, ${today}</h2>${top}${studentGroupJoinLink(assignedGroup() || myGroup)}<div class="msg err">${msg}</div></div>
   <div class="card"><h2>My last sign-ins</h2><div class="wrap">${table(hist, false)}</div></div>`;
 }
-const choose = i => { pick = i; render(); };
+const choose = i => { if (pick !== i) myPersonalStudentType = ''; pick = i; render(); };
 async function sign() {
   const today = ymd(new Date()); msg = '';
   if (!isWeekday(new Date())) return say('Register is closed on weekends.');
   if (records().some(x => x.date === today && x.sn === session.sn)) return say('You already have an attendance record today and cannot sign in again.');
-  const studentType = attendanceTypeForProfile(studentProfile()) || myStudentType;
+  const personalPick = personalNums().includes(pick);
+  const studentType = personalPick ? myPersonalStudentType : attendanceTypeForProfile(studentProfile()) || myStudentType;
+  if (personalPick && !studentType) return say('Choose a student type for the personal PC sign-in.');
   const grp = studentType === STUDENT_CATEGORY ? assignedGroup() || (groupLocked() ? '' : myGroup) : '';
   if (!studentType) return say('Please choose your student type.');
   if (studentType === STUDENT_CATEGORY && !grp) return say(groupLocked() ? 'Your group has not been assigned. Please ask an admin.' : 'Please choose your group.');
@@ -379,7 +382,7 @@ async function sign() {
         ? { group: grp, studentType, personalPCProgram: false, groupLocked: true }
         : { group: '', studentType, personalPCProgram: true, groupLocked: true });
     });
-    pick = null; render();
+    pick = null; myPersonalStudentType = ''; render();
   } catch (e) { pick = null; say(e.message === 'taken' ? 'This student already has an attendance record today, or that PC is taken.' : 'Could not save. Check your internet and try again.'); }
 }
 
@@ -478,7 +481,7 @@ function adminRecordDetails() {
   return `<div class="card" id="recordDetails"><h2>Sign-in details</h2>
     <p><b>${esc(rec.name)}</b> (${esc(rec.sn)})</p>
     <p>${rec.date} (${dayName(rec.date)}) · ${esc(attendanceCategory(rec))} · ${pcLabel(rec)}</p>
-    <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? esc(new Date(rec.returnedAt).toLocaleString()) : isP(rec) ? 'Personal PC' : 'Not returned'}</p>
+    <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? `${esc(new Date(rec.returnedAt).toLocaleString())} · marked by ${esc(rec.returnedBy || 'Staff not recorded')}` : isP(rec) ? 'Personal PC' : 'Not returned'}</p>
     <p>Signature: ${rec.signature ? `<img src="${esc(rec.signature)}" alt="Signature of ${esc(rec.name)}" style="width:180px;height:64px;object-fit:contain">` : 'Not captured'}</p>
     ${isP(rec) ? '' : `<button class="sm" onclick="returnPc('${esc(rec.id)}')">Record return</button><button class="sm" onclick="editPc('${esc(rec.id)}')">Change PC</button>`}
     <button class="sm alt" onclick="removeRec('${esc(rec.id)}')">Remove sign-in</button>
@@ -563,6 +566,7 @@ function adminView() {
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
     <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
+    <div><label for="personalType">Student type</label><select id="personalType"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}">${esc(type)}</option>`).join('')}</select></div>
     <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div>
     <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
     <button onclick="markPersonal()">Mark as personal PC</button></div></section>` : ''}
@@ -757,8 +761,10 @@ async function markPersonal() {
   if (!hasPermission('attendance')) return;
   const sn = $('pp').value, date = $('pd').value, u = users().find(x => x.sn === sn);
   if (!u) return say('Choose a student.');
-  const personalPCProgram = Boolean(u.personalPCProgram || isLegacyPersonalGroup(u.group)), group = personalPCProgram ? '' : $('pg').value || u.group || '', studentType = personalPCProgram ? u.studentType || '' : '';
-  if (personalPCProgram && !studentType) return say('Assign a student type before marking this student present.');
+  const studentType = $('personalType').value, personalPCProgram = studentType !== STUDENT_CATEGORY;
+  const group = personalPCProgram ? '' : $('pg').value || (u.group && !isLegacyPersonalGroup(u.group) ? u.group : '');
+  if (!studentType) return say('Choose a student type for the personal-PC attendance record.');
+  if (studentType === STUDENT_CATEGORY && !group) return say('Choose a group for this student.');
   if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
   if (records().some(r => r.date === date && r.sn === sn)) return say('This student already has an attendance record on that day.');
   const num = parseInt($('pn').value, 10) || 0;
@@ -858,9 +864,9 @@ async function saveStaffPermissions(button) {
 function table(list, admin) {
   if (!list.length) return '<p>No sign-ins yet.</p>';
   if (admin) return `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>Group / type</th><th>PC</th><th>Status</th><th></th></tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? 'Returned' : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
+    list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? `Returned${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? 'Personal PC' : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
-    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? new Date(r.returnedAt).toLocaleString() : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
+    list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? `${esc(new Date(r.returnedAt).toLocaleString())}${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? 'Personal PC' : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
       (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function returnPc(id) {
@@ -1072,7 +1078,7 @@ function zipReplyCard(reply) {
 }
 function updatesView(staff) {
   const canManage = staff && hasPermission('updates');
-  const group = assignedGroup();
+  const group = assignedGroup() || myGroup;
   const replies = C.zipReplies.slice().sort((a, b) => b.created - a.created);
   const visible = C.updates.filter(x => staff || !x.group || x.group === 'All students' || x.group === group)
     .sort((a, b) => b.created - a.created);
@@ -1164,8 +1170,15 @@ function reportName() {
   if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `WM-LPR-week-${ymd(m)}-to-${ymd(f)}`; }
   return `WM-LPR-month-${range.value.slice(0, 7)}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
-const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at', 'Signature'];
+const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? 'Personal PC' : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
+const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at / staff', 'Signature'];
+function pcListSummary(list) {
+  const assigned = list.filter(record => hasRecordedPc(record.pc));
+  const labAssignments = assigned.filter(record => !isP(record));
+  const uniqueLabPcs = new Set(labAssignments.map(record => String(record.pc))).size;
+  const personalAssignments = assigned.length - labAssignments.length;
+  return `PC assignments: ${assigned.length} | Unique lab PCs: ${uniqueLabPcs} | Personal PC assignments: ${personalAssignments}`;
+}
 function exportXlsx() {
   if (!hasPermission('attendance')) return;
   const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
@@ -1175,9 +1188,11 @@ function exportXlsx() {
 }
 function exportPdf() {
   if (!hasPermission('attendance')) return;
+  const list = inRange();
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
-  doc.setFontSize(14); doc.text('WM-LPR: ' + reportName().replace('WM-LPR-', ''), 14, 16);
-  doc.autoTable({ head: [HEAD], body: rows(), startY: 22, styles: { fontSize: 9 } });
+  doc.setFontSize(14); doc.text('WM-LPR: ' + reportName().replace('WM-LPR-', ''), 14, 14);
+  doc.setFontSize(9); doc.text(pcListSummary(list), 14, 20);
+  doc.autoTable({ head: [HEAD], body: rows(), startY: 25, styles: { fontSize: 9 } });
   doc.save(reportName() + '.pdf');
 }
 let docxLoadPromise = null;
@@ -1355,11 +1370,12 @@ function exportGroupPdf() {
   const group = $('groupExport').value, groupRows = inRange().filter(r => r.group === group);
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
   doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text(groupLabel(group), 14, 15);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('WM-LPR-', ''), 14, 22);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('WM-LPR-', ''), 14, 21);
+  doc.setFontSize(9); doc.text(pcListSummary(groupRows), 14, 27);
   doc.autoTable({
     head: [['Date', 'Day', 'Student no.', 'Name', 'PC', 'Signed in', 'Returned at', 'Signature']],
-    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? new Date(r.returnedAt).toLocaleString() : (isP(r) ? 'Personal PC' : 'Not returned'), '']),
-    startY: 28,
+    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? 'Personal PC' : 'Not returned'), '']),
+    startY: 33,
     styles: { fontSize: 8, minCellHeight: 18 },
     columnStyles: { 7: { cellWidth: 40 } },
     didDrawCell(data) {
