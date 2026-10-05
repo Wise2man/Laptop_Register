@@ -114,6 +114,7 @@ function render() {
     session.mustChangePassword = true; keepSession();
     return forcedPasswordView();
   }
+  if (session.role === 'student' && needsStudentProfileCompletion(studentProfile())) return studentProfileCompletionView();
   if (session.role === 'student' && !studentProfile().signature) return signatureSetupView();
   const staff = isStaff(), n = liveReports().filter(r => r.status === 'pending').length;
   $('nav').innerHTML = `<a href="#" class="${page() === 'register' ? 'on' : ''}">${staff ? 'Admin' : 'Register'}</a>` +
@@ -137,14 +138,15 @@ function authView() {
       ${needAdmin ? `<button class="${tab === 'admin' ? '' : 'alt'}" onclick="setTab('admin')">Set up admin</button>` : ''}
     </div>
     ${tab === 'signup' ? `
-      <label for="n">Full name</label><input id="n" autocomplete="name">
-      <label for="s">Student number</label><input id="s" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,13)">
+      <label for="firstName">First name</label><input id="firstName" autocomplete="given-name">
+      <label for="surname">Surname</label><input id="surname" autocomplete="family-name">
+      <label for="s">Student number (exactly 13 digits)</label><input id="s" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,13)">
       <label for="p">Password (at least 6 characters)</label><input id="p" type="password">
       <label for="signature">Write your signature</label><canvas id="signature" class="signature-pad" width="560" height="150" aria-label="Signature drawing area"></canvas>
       <button type="button" class="alt" onclick="clearSignature()">Clear signature</button>
       <button onclick="signup()">Create account</button>` :
     tab === 'login' ? `
-      <label for="s">Student number or admin username</label><input id="s" autocapitalize="off">
+      <label for="s">Student number (13 digits) or admin username (numeric admin IDs: 9 or 13 digits)</label><input id="s" autocapitalize="off">
       <label for="p">Password</label><input id="p" type="password">
       <button onclick="login()">Log in</button>` : `
       <p>First time here. Create the first admin account.</p>
@@ -193,16 +195,17 @@ const setTab = t => { tab = t; msg = ''; render(); };
 const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render(); };
 
 async function signup() {
-  const name = $('n').value.trim(), sn = $('s').value.trim().toUpperCase(), p = $('p').value;
+  const firstName = $('firstName').value.trim(), surname = $('surname').value.trim(), name = `${firstName} ${surname}`.trim();
+  const sn = $('s').value.trim(), p = $('p').value;
   const signature = signatureDrawn ? $('signature').toDataURL('image/png') : '';
-  if (!name || !sn) return say('Please fill in your name and student number.');
-  if (!/^\d{1,13}$/.test(sn)) return say('Student number must contain only digits and be no more than 13 digits.');
+  if (!firstName || !surname) return say('Please enter both your first name and surname.');
+  if (!/^\d{13}$/.test(sn)) return say('Student number must contain exactly 13 digits.');
   if (!signature) return say('Please write your signature before creating the account.');
   if (findAdmin(sn)) return say('This student number is not allowed.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   try {
     const ref = fs.collection('users').doc(sn);
-    const account = { name, sn, pw: await hash(sn + ':' + p), signature };
+    const account = { name, firstName, surname, sn, pw: await hash(sn + ':' + p), signature };
     let exists = false;
     await fs.runTransaction(async tx => {
       const current = await tx.get(ref);
@@ -216,14 +219,110 @@ async function signup() {
 async function login() {
   const raw = $('s').value.trim(), p = $('p').value, ad = findAdmin(raw);
   if (ad) {
+    if (/^\d+$/.test(raw) && !/^(?:\d{9}|\d{13})$/.test(raw)) return say('Admin number must contain 9 or 13 digits.');
     if (ad.pw !== await hash(ad.user + ':' + p)) return say('Wrong admin password.');
     session = { role: ad.role === 'staff' ? 'staff' : 'admin', name: ad.user, user: ad.user, mustChangePassword: Boolean(ad.mustChangePassword) };
   } else {
     const sn = raw.toUpperCase(), u = users().find(x => x.sn === sn);
-    if (!u || u.pw !== await hash(sn + ':' + p)) return say('Wrong username or password.');
+    if (!u) return say(/^\d+$/.test(sn) && sn.length !== 13 ? 'Student number must contain exactly 13 digits.' : 'Wrong username or password.');
+    if (u.pw !== await hash(`${u.passwordKey || sn}:${p}`)) return say('Wrong username or password.');
     session = { role: 'student', sn, name: u.name, mustChangePassword: Boolean(u.mustChangePassword) };
   }
   myGroup = ''; myStudentType = ''; signatureMessage = ''; keepSession(); msg = ''; render();
+}
+function studentNameParts(profile) {
+  const words = String(profile.name || '').trim().split(/\s+/).filter(Boolean);
+  const storedFirst = String(profile.firstName || '').trim(), storedSurname = String(profile.surname || '').trim();
+  let firstName = storedFirst, surname = storedSurname;
+  if (!firstName && !surname) {
+    firstName = words.length > 1 ? words.slice(0, -1).join(' ') : words[0] || '';
+    surname = words.length > 1 ? words[words.length - 1] : '';
+  } else if (firstName && !surname) {
+    const firstWords = firstName.split(/\s+/);
+    if (words.length > firstWords.length && firstWords.every((word, index) => word.toLowerCase() === words[index].toLowerCase())) surname = words.slice(firstWords.length).join(' ');
+  } else if (!firstName && surname) {
+    const surnameWords = surname.split(/\s+/), start = words.length - surnameWords.length;
+    if (start > 0 && surnameWords.every((word, index) => word.toLowerCase() === words[start + index].toLowerCase())) firstName = words.slice(0, start).join(' ');
+  }
+  return { firstName, surname };
+}
+function needsStudentProfileCompletion(profile) {
+  const parts = studentNameParts(profile);
+  return !/^\d{13}$/.test(String(profile.sn || '')) || !parts.firstName || !parts.surname;
+}
+function studentProfileCompletionView() {
+  const profile = studentProfile(), parts = studentNameParts(profile);
+  $('nav').innerHTML = '';
+  $('app').innerHTML = `<div class="card"><h2>Complete your student details</h2>
+    <p>Student numbers must contain 13 digits. Enter your first name and surname separately.</p>
+    <label for="profileStudentNumber">Student number (13 digits)</label><input id="profileStudentNumber" value="${esc(profile.sn)}" inputmode="numeric" maxlength="13" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,13)">
+    <label for="profileFirstName">First name</label><input id="profileFirstName" value="${esc(parts.firstName)}" autocomplete="given-name" ${parts.firstName ? 'readonly' : ''}>
+    <label for="profileSurname">Surname</label><input id="profileSurname" value="${esc(parts.surname)}" autocomplete="family-name" ${parts.surname ? 'readonly' : ''}>
+    <button onclick="completeStudentProfile()">Save student details</button><div class="msg err">${esc(msg)}</div></div>`;
+}
+async function completeStudentProfile() {
+  if (!session || session.role !== 'student') return;
+  const profile = studentProfile(), oldSn = profile.sn, sn = $('profileStudentNumber').value.trim();
+  const { firstName, surname } = studentNameParts({ firstName: $('profileFirstName').value.trim(), surname: $('profileSurname').value.trim() });
+  if (!/^\d{13}$/.test(sn)) return say('Student number must contain exactly 13 digits.');
+  if (!firstName || !surname) return say('Please enter both your first name and surname.');
+  if (findAdmin(sn)) return say('That student number is used by an admin account. Contact an admin.');
+  if (users().some(user => user.sn === sn && user.sn !== oldSn)) return say('That student number is already in use. Contact an admin.');
+  try {
+    const updatedProfile = await migrateStudentIdentity(profile, sn, firstName, surname);
+    session.sn = sn; session.name = updatedProfile.name; keepSession(); msg = ''; render();
+  } catch (e) { say(e.message === 'duplicate' ? 'That student number already has an account.' : 'Could not update your student details. Contact an admin.'); }
+}
+async function migrateStudentIdentity(profile, newSn, firstName, surname) {
+  const oldSn = profile.sn, name = `${firstName} ${surname}`.trim(), operations = [];
+  const updateMatching = (collection, items) => items.filter(item => item.sn === oldSn && item.id)
+    .forEach(item => operations.push({ kind: 'update', ref: fs.collection(collection).doc(item.id), data: { sn: newSn, name } }));
+  updateMatching('records', C.records);
+  updateMatching('reports', C.reports);
+  updateMatching('zipReplies', C.zipReplies);
+
+  if (oldSn !== newSn) {
+    const dailyDocs = await fs.collection('studentDays').where('sn', '==', oldSn).get();
+    for (const dailyDoc of dailyDocs.docs) {
+      const data = dailyDoc.data(), newId = `${data.date}_${newSn}`, newRef = fs.collection('studentDays').doc(newId);
+      if (newId !== dailyDoc.id) {
+        if ((await newRef.get()).exists) throw new Error('duplicate');
+        operations.push({ kind: 'set', ref: newRef, data: { ...data, sn: newSn } });
+        operations.push({ kind: 'delete', ref: dailyDoc.ref });
+      }
+    }
+    const oldLogRef = fs.collection('reportlog').doc(oldSn), newLogRef = fs.collection('reportlog').doc(newSn);
+    const [oldLog, newLog] = await Promise.all([oldLogRef.get(), newLogRef.get()]);
+    if (oldLog.exists) {
+      const times = [...new Set([...(newLog.exists ? newLog.data().times || [] : []), ...(oldLog.data().times || [])])].sort((a, b) => a - b);
+      operations.push({ kind: 'set', ref: newLogRef, data: { ...(newLog.exists ? newLog.data() : {}), ...oldLog.data(), sn: newSn, times } });
+      operations.push({ kind: 'delete', ref: oldLogRef });
+    }
+  }
+
+  for (let offset = 0; offset < operations.length; offset += 400) {
+    const batch = fs.batch();
+    for (const operation of operations.slice(offset, offset + 400)) {
+      if (operation.kind === 'update') batch.update(operation.ref, operation.data);
+      else if (operation.kind === 'set') batch.set(operation.ref, operation.data);
+      else batch.delete(operation.ref);
+    }
+    await batch.commit();
+  }
+
+  const account = { ...profile, sn: newSn, name, firstName, surname };
+  if (oldSn !== newSn) account.passwordKey = profile.passwordKey || oldSn;
+  const accountBatch = fs.batch(), newAccountRef = fs.collection('users').doc(newSn);
+  accountBatch.set(newAccountRef, account);
+  if (oldSn !== newSn) accountBatch.delete(fs.collection('users').doc(oldSn));
+  await accountBatch.commit();
+
+  const updateIdentity = list => list.map(item => item.sn === oldSn ? { ...item, sn: newSn, name } : item);
+  C.records = updateIdentity(C.records);
+  C.reports = updateIdentity(C.reports);
+  C.zipReplies = updateIdentity(C.zipReplies);
+  C.users = [...C.users.filter(user => user.sn !== oldSn), account];
+  return account;
 }
 function forcedPasswordView() {
   $('nav').innerHTML = '';
@@ -241,9 +340,9 @@ async function completeForcedPasswordChange() {
   try {
     const pw = await hash(`${session.sn || session.user}:${password}`);
     if (session.role === 'student') {
-      await fs.collection('users').doc(session.sn).update({ pw, mustChangePassword: false });
+      await fs.collection('users').doc(session.sn).update({ pw, mustChangePassword: false, passwordKey: null });
       const student = users().find(u => u.sn === session.sn);
-      if (student) { student.pw = pw; student.mustChangePassword = false; }
+      if (student) { student.pw = pw; student.mustChangePassword = false; student.passwordKey = null; }
     } else {
       const admins = settings().admins.map(account => account.user === session.user ? { ...account, pw, mustChangePassword: false } : account);
       const updatedSettings = { ...settings(), admins };
@@ -256,12 +355,13 @@ async function setupAdmin() {
   if (settings().admins.length) return say('An admin already exists. Please log in.');
   const user = $('s').value.trim().toLowerCase(), p = $('p').value;
   if (!user) return say('Type an admin username.');
+  if (/^\d+$/.test(user) && !/^(?:\d{9}|\d{13})$/.test(user)) return say('Numeric admin usernames must contain 9 or 13 digits.');
   if (users().some(x => x.sn.toLowerCase() === user)) return say('That name is used by a student. Choose another.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p), role: 'admin' }] });
   session = { role: 'admin', name: user, user }; keepSession(); msg = ''; render();
 }
-function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; myGroup = ''; myStudentType = ''; signatureMessage = ''; render(); }
+function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; myGroup = ''; myStudentType = ''; myPersonalStudentType = ''; signatureMessage = ''; render(); }
 
 /* ---------- Location ---------- */
 function distance(a, b, c, d) {
@@ -789,6 +889,7 @@ async function addAdmin() {
   const user = $('staffUser').value.trim().toLowerCase(), p = $('staffPassword').value;
   const permissions = [...document.querySelectorAll('input[name="staffPermission"]:checked')].map(input => input.value);
   if (!user) return say('Type a username for the staff account.');
+  if (/^\d+$/.test(user) && !/^(?:\d{9}|\d{13})$/.test(user)) return say('Numeric admin usernames must contain 9 or 13 digits.');
   if (findAdmin(user) || users().some(x => x.sn.toLowerCase() === user)) return say('That username is already used.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   await saveSettings({ ...st, admins: [...st.admins, { user, pw: await hash(user + ':' + p), role: 'staff', permissions }] }); say('Staff account added.', true);
@@ -812,8 +913,9 @@ async function resetStudent(i) {
   if (!student || !confirm(`Reset ${student.name}'s password? They will need to create a new password at next login.`)) return;
   const temporary = temporaryPassword();
   try {
-    await fs.collection('users').doc(student.sn).update({ pw: await hash(student.sn + ':' + temporary), mustChangePassword: true });
-    student.pw = await hash(student.sn + ':' + temporary); student.mustChangePassword = true;
+    const pw = await hash(student.sn + ':' + temporary);
+    await fs.collection('users').doc(student.sn).update({ pw, mustChangePassword: true, passwordKey: null });
+    student.pw = pw; student.mustChangePassword = true; student.passwordKey = null;
     alert(`Temporary password for ${student.name}: ${temporary}\nGive it to them privately. They will be asked to create a new password when they log in.`);
     say(`Password reset for ${esc(student.name)}.`, true);
   } catch (e) { say('Could not reset the student password.'); }
