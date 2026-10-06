@@ -420,7 +420,11 @@ const isLegacyPersonalGroup = group => {
 const STUDENT_CATEGORY = 'Student';
 const DEFAULT_STUDENT_TYPES = ['Interns', 'Work Integrated Learning'];
 const BUILT_IN_STUDENT_TYPES = [STUDENT_CATEGORY, ...DEFAULT_STUDENT_TYPES];
-const studentTypes = () => [...new Set([...BUILT_IN_STUDENT_TYPES, ...(settings().studentTypes || []).filter(type => !BUILT_IN_STUDENT_TYPES.includes(type))])];
+const studentTypes = () => {
+  const saved = (settings().studentTypes || []).filter(type => type && type !== STUDENT_CATEGORY);
+  const others = settings().studentTypesEdited ? saved : [...DEFAULT_STUDENT_TYPES, ...saved.filter(type => !DEFAULT_STUDENT_TYPES.includes(type))];
+  return [STUDENT_CATEGORY, ...new Set(others)];
+};
 const attendanceTypeForProfile = profile => profile.studentType || (profile.group && !profile.personalPCProgram && !isLegacyPersonalGroup(profile.group) ? STUDENT_CATEGORY : '');
 function groupYearFor(group) { return (settings().groupYears || {})[group] || ''; }
 function groupLabel(group, year) {
@@ -518,16 +522,85 @@ async function sign() {
 }
 
 /* ---------- Admin ---------- */
-let range = { type: 'week', value: ymd(new Date()) };
-let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', selectedStaffUser = '', adminTab = 'register';
+let range = (() => { const m = mondayOf(ymd(new Date())), f = new Date(m); f.setDate(m.getDate() + 4); return { from: ymd(m), to: ymd(f), scope: '' }; })();
+let selectedRecordId = '', selectedStudentSn = '', selectedGroup = '', selectedType = '', selectedStaffUser = '', adminTab = 'register';
 let studentSearch = { field: 'all', query: '' };
+function rangeBounds() {
+  let from = range.from || ymd(new Date()), to = range.to || from;
+  if (to < from) [from, to] = [to, from];
+  return { from, to };
+}
+/* Sorting: lists of sign-ins and the people in registers can each be sorted several ways. */
+let listSort = 'pc', rosterSort = 'surname';
+const SORT_OPTIONS = [['pc', 'PC number (1, 2, 3...)'], ['name', 'Name (A to Z)'], ['surname', 'Surname (A to Z)'], ['sn', 'Student number'], ['time', 'Time signed in']];
+const ROSTER_SORT_OPTIONS = [['surname', 'Surname (A to Z)'], ['name', 'First name (A to Z)'], ['sn', 'Student number']];
+const cmpNum = (x, y) => x === y ? 0 : x < y ? -1 : 1;
+const cmpText = (x, y) => String(x || '').localeCompare(String(y || ''), undefined, { numeric: true, sensitivity: 'base' });
+const lastWord = value => String(value || '').trim().split(/\s+/).pop();
+const pcSortValue = r => { const n = Number(r.pc); return r.excused || !hasRecordedPc(r.pc) || Number.isNaN(n) ? Infinity : n; };
+const RECORD_SORTERS = {
+  pc: (a, b) => cmpNum(pcSortValue(a), pcSortValue(b)) || cmpText(a.name, b.name),
+  name: (a, b) => cmpText(a.name, b.name) || cmpNum(pcSortValue(a), pcSortValue(b)),
+  surname: (a, b) => cmpText(lastWord(a.name), lastWord(b.name)) || cmpText(a.name, b.name),
+  sn: (a, b) => cmpText(a.sn, b.sn),
+  time: (a, b) => cmpNum(Number(a.signedAt) || 0, Number(b.signedAt) || 0) || cmpText(a.time, b.time)
+};
+const recordCmp = () => RECORD_SORTERS[listSort] || RECORD_SORTERS.pc;
+const sortRecords = list => [...list].sort(recordCmp());
+const sortOptionsHtml = (options, selected) => options.map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`).join('');
+function setListSort(value) { listSort = RECORD_SORTERS[value] ? value : 'pc'; render(); }
+function setRosterSort(value) { rosterSort = ['surname', 'name', 'sn'].includes(value) ? value : 'surname'; render(); }
+function sortPeople(list) {
+  const surname = p => lastWord(p.surname || p.name);
+  const by = { surname: (a, b) => cmpText(surname(a), surname(b)) || cmpText(a.name, b.name), name: (a, b) => cmpText(a.name, b.name), sn: (a, b) => cmpText(a.sn, b.sn) };
+  return [...list].sort(by[rosterSort] || by.surname);
+}
 function inRange() {
-  let list = records();
-  if (range.type === 'week') {
-    const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4);
-    list = list.filter(r => r.date >= ymd(m) && r.date <= ymd(f));
-  } else list = list.filter(r => r.date.startsWith(range.value.slice(0, 7)));
-  return [...list].sort((a, b) => a.date.localeCompare(b.date) || String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
+  const b = rangeBounds(), cmp = recordCmp();
+  return records().filter(r => r.date >= b.from && r.date <= b.to)
+    .sort((a, c) => a.date.localeCompare(c.date) || cmp(a, c));
+}
+/* Scope = which group / student type an export covers. '' = everyone, 'g:<group>', 't:<student type>', 'none'. */
+function recordInScope(scope, r) {
+  if (!scope) return true;
+  if (scope === 'none') return (!r.group || isLegacyPersonalGroup(r.group)) && !attendanceStudentType(r);
+  if (scope.startsWith('g:')) return r.group === scope.slice(2);
+  if (scope.startsWith('t:')) return attendanceStudentType(r) === scope.slice(2);
+  return true;
+}
+function userInScope(scope, u) {
+  if (!scope) return true;
+  const type = attendanceTypeForProfile(u);
+  if (scope === 'none') return !u.group && !type;
+  if (scope.startsWith('g:')) return u.group === scope.slice(2);
+  if (scope.startsWith('t:')) return type === scope.slice(2);
+  return true;
+}
+function scopeEntries(extra = []) {
+  const groups = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
+  extra.forEach(r => { if (r.group && !isLegacyPersonalGroup(r.group) && !groups.includes(r.group)) groups.push(r.group); });
+  const types = studentTypes();
+  extra.forEach(r => { const t = attendanceStudentType(r); if (t && !types.includes(t)) types.push(t); });
+  return [
+    ...groups.map(g => ({ id: 'g:' + g, label: groupLabel(g), kind: 'group' })),
+    ...types.map(t => t === STUDENT_CATEGORY
+      ? { id: 't:' + t, label: 'All regular students (every group)', kind: 'type', aggregate: true }
+      : { id: 't:' + t, label: t, kind: 'type' })
+  ];
+}
+function scopeLabel(scope) {
+  if (!scope) return 'Everyone';
+  if (scope === 'none') return 'No group / student type';
+  const e = scopeEntries(records()).find(x => x.id === scope);
+  return e ? e.label : scope.slice(2);
+}
+const scopedRecords = () => inRange().filter(r => recordInScope(range.scope, r));
+/* Splits a list so each sign-in lands in exactly one bucket (group, then student type, then none). */
+function scopeBuckets(list) {
+  const entries = [...scopeEntries(list).filter(e => !e.aggregate), { id: 'none', label: 'No group / student type' }];
+  const buckets = new Map(entries.map(e => [e.id, { id: e.id, label: e.label, list: [] }]));
+  list.forEach(r => { const e = entries.find(x => recordInScope(x.id, r)); if (e) buckets.get(e.id).list.push(r); });
+  return [...buckets.values()];
 }
 let attendanceFilters = { query: '', from: '', to: '', group: '', type: '', pc: '', status: '' };
 function filteredAttendance() {
@@ -544,7 +617,7 @@ function filteredAttendance() {
     if (f.status === 'personal' && (!isP(r) || r.excused)) return false;
     if (f.status === 'excused' && !r.excused) return false;
     return true;
-  }).sort((a, b) => b.date.localeCompare(a.date) || (Number(b.signedAt) || 0) - (Number(a.signedAt) || 0));
+  }).sort((a, b) => b.date.localeCompare(a.date) || recordCmp()(a, b));
 }
 function attendanceSearchCard() {
   const f = attendanceFilters, list = filteredAttendance(), display = list.slice(0, 100);
@@ -555,7 +628,8 @@ function attendanceSearchCard() {
     <div class="row"><div><label for="attendanceGroup">Group</label><select id="attendanceGroup"><option value="">All groups</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}" ${f.group === g ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('')}</select></div>
     <div><label for="attendanceType">Student type</label><select id="attendanceType"><option value="">All types</option>${studentTypes().map(type => `<option value="${esc(type)}" ${f.type === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></div>
     <div><label for="attendancePc">PC number</label><input id="attendancePc" value="${esc(f.pc)}" inputmode="numeric" placeholder="Any PC"></div>
-    <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option><option value="excused" ${f.status === 'excused' ? 'selected' : ''}>Excused (approved report)</option></select></div></div>
+    <div><label for="attendanceStatus">Return status</label><select id="attendanceStatus"><option value="">All statuses</option><option value="out" ${f.status === 'out' ? 'selected' : ''}>Not returned</option><option value="returned" ${f.status === 'returned' ? 'selected' : ''}>Returned</option><option value="personal" ${f.status === 'personal' ? 'selected' : ''}>Personal PC</option><option value="excused" ${f.status === 'excused' ? 'selected' : ''}>Excused (approved report)</option></select></div>
+    <div><label for="attendanceSort">Sort by</label><select id="attendanceSort" onchange="listSort = this.value; applyAttendanceFilters()">${sortOptionsHtml(SORT_OPTIONS, listSort)}</select></div></div>
     <button onclick="applyAttendanceFilters()">Search</button><button class="alt" onclick="clearAttendanceFilters()">Clear</button>
     <p>${list.length} match(es)${list.length > display.length ? `; showing the latest ${display.length}` : ''}.</p>${table(display, true)}</div>`;
 }
@@ -579,8 +653,14 @@ function viewStudent(sn) {
   render();
   $('studentDetails')?.scrollIntoView({ block: 'nearest' });
 }
+function viewType(type) {
+  selectedType = type; selectedGroup = '';
+  adminTab = 'groups';
+  render();
+  $('typeDetails')?.scrollIntoView({ block: 'nearest' });
+}
 function viewGroup(group) {
-  selectedGroup = group;
+  selectedGroup = group; selectedType = '';
   adminTab = 'groups';
   render();
   $('groupDetails')?.scrollIntoView({ block: 'nearest' });
@@ -605,8 +685,59 @@ function adminGroupDetails() {
     <div><label for="groupWhatsAppDetail">WhatsApp invite link</label><input id="groupWhatsAppDetail" type="url" placeholder="https://chat.whatsapp.com/..." value="${esc(groupWhatsAppUrl(selectedGroup))}" onchange="setGroupWhatsAppLink(${i}, this.value)"></div></div>
     <h3>Students</h3>${members.length ? `<ul>${members.map(u => `<li>${hasPermission('students') ? `<a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a>` : `${esc(u.name)} (${esc(u.sn)})`}</li>`).join('')}</ul>` : '<p>No students are assigned to this group.</p>'}
     ${hasPermission('attendance') ? `<h3>Attendance history</h3>${table(history, true)}` : ''}
+    ${registerGridCard(STUDENT_CATEGORY, selectedGroup)}
+    <button class="sm" onclick="composeUpdate(this.dataset.target)" data-target="g:${esc(selectedGroup)}">Send an update to this group</button>
     <button class="sm alt" onclick="removeGroup(${i})">Remove group</button>
     <button class="sm alt" onclick="selectedGroup = ''; render()">Close details</button></div>`;
+}
+function otherGroupsCard() {
+  const types = studentTypes().filter(t => t !== STUDENT_CATEGORY);
+  return `<div class="card"><h2>Other groups (student types)</h2>
+    <p>People who are not in a regular group, such as interns. Open one to see its people and register, change its name, or send it an update.</p>
+    ${types.length ? `<ul class="link-list">${types.map(t => `<li><a href="#typeDetails" onclick="viewType(this.dataset.type); return false" data-type="${esc(t)}">${esc(t)}</a><span>${users().filter(u => attendanceTypeForProfile(u) === t).length} people</span></li>`).join('')}</ul>` : '<p>None yet.</p>'}
+    <label for="newStudentType">New other group / student type</label><input id="newStudentType" maxlength="50">
+    <button onclick="addStudentType()">Add</button></div>`;
+}
+function adminTypeDetails() {
+  const type = selectedType;
+  if (!type || type === STUDENT_CATEGORY || !studentTypes().includes(type)) return '';
+  const members = users().filter(u => attendanceTypeForProfile(u) === type);
+  const history = hasPermission('attendance') ? records().filter(r => attendanceStudentType(r) === type)
+    .sort((a, b) => b.date.localeCompare(a.date) || (Number(b.signedAt) || 0) - (Number(a.signedAt) || 0)) : [];
+  return `<div class="card" id="typeDetails"><h2>${esc(type)}</h2>
+    <p>${members.length} ${members.length === 1 ? 'person' : 'people'}${hasPermission('attendance') ? ` · ${history.length} attendance record(s)` : ''}</p>
+    <div class="row"><div><label for="typeName">Name of this group</label><input id="typeName" maxlength="50" value="${esc(type)}"></div></div>
+    <button class="sm" onclick="renameStudentType()">Save name</button>
+    <p class="download-progress">Renaming also updates the people and old sign-ins that use this name.</p>
+    <h3>People</h3>${members.length ? `<ul>${members.map(u => `<li>${hasPermission('students') ? `<a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a>` : `${esc(u.name)} (${esc(u.sn)})`}</li>`).join('')}</ul>` : '<p>Nobody is in this group yet.</p>'}
+    ${registerGridCard(type, '')}
+    ${hasPermission('attendance') ? `<h3>Attendance history</h3>${table(history.slice(0, 100), true)}${history.length > 100 ? `<p>Showing the latest 100 of ${history.length}.</p>` : ''}` : ''}
+    <button class="sm" onclick="composeUpdate(this.dataset.target)" data-target="t:${esc(type)}">Send an update to this group</button>
+    <button class="sm alt" onclick="removeStudentType()">Remove this group</button>
+    <button class="sm alt" onclick="selectedType = ''; render()">Close details</button></div>`;
+}
+/* One row per person for the whole group; each day a person signs, their signature goes on their own row. */
+let registerWeek = ymd(mondayOf(ymd(new Date())));
+function setRegisterWeek(value) { if (value) registerWeek = ymd(mondayOf(value)); render(); }
+function shiftRegisterWeek(n) { const d = parse(registerWeek); d.setDate(d.getDate() + 7 * n); registerWeek = ymd(d); render(); }
+function registerGridCard(type, group) {
+  const monday = parse(registerWeek), days = [0, 1, 2, 3, 4].map(i => { const d = new Date(monday); d.setDate(monday.getDate() + i); return ymd(d); });
+  const weekRecords = records().filter(r => r.date >= days[0] && r.date <= days[4] && matchesWordRegister(r, type, group));
+  const roster = wordRegisterRoster(type, group, weekRecords);
+  const cell = (person, date) => {
+    const r = weekRecords.find(x => x.sn === person.sn && x.date === date);
+    if (!r) return '';
+    if (r.excused) return '<small>Excused</small>';
+    const sig = r.signature && r.signature.startsWith('data:image/') ? `<img src="${esc(r.signature)}" alt="Signature" style="height:26px;max-width:80px">` : '&#10003;';
+    return `${sig}<br><small>PC ${esc(pcLabel(r))}</small>`;
+  };
+  const signedCount = new Set(weekRecords.map(r => r.sn)).size;
+  return `<h3>Attendance register</h3>
+    <div class="row"><div><label for="registerWeekInput">Week (pick any day)</label><input id="registerWeekInput" type="date" value="${esc(registerWeek)}" onchange="setRegisterWeek(this.value)"></div>
+    <div><label for="registerPeopleSort">Sort people by</label><select id="registerPeopleSort" onchange="setRosterSort(this.value)">${sortOptionsHtml(ROSTER_SORT_OPTIONS, rosterSort)}</select></div></div>
+    <button type="button" class="sm alt" onclick="shiftRegisterWeek(-1)">Previous week</button><button type="button" class="sm alt" onclick="shiftRegisterWeek(1)">Next week</button>
+    <p><b>${roster.length} ${roster.length === 1 ? 'person' : 'people'}</b> in this register · ${signedCount} signed this week (${days[0]} to ${days[4]}).</p>
+    ${roster.length ? `<div class="wrap"><table><tr><th>#</th><th>Name</th><th>Student no.</th>${days.map(d => `<th>${dayName(d).slice(0, 3)}<br><small>${d.slice(5)}</small></th>`).join('')}</tr>${roster.map((person, i) => `<tr><td>${i + 1}</td><td>${esc(person.name || '')}</td><td>${esc(person.sn)}</td>${days.map(d => `<td>${cell(person, d)}</td>`).join('')}</tr>`).join('')}</table></div>` : '<p>Nobody is in this register yet. People are added the first time they choose this group and sign in.</p>'}`;
 }
 function adminRecordDetails() {
   const rec = records().find(r => r.id === selectedRecordId);
@@ -628,6 +759,7 @@ function adminStudentDetails() {
     <p>Student number: ${esc(user.sn)}<br>Group: ${esc(user.group ? groupLabel(user.group) : 'None')}<br>Student type: ${esc(user.studentType || 'None')}</p>
     <div class="row"><div><label for="studentGroup">Group</label><select id="studentGroup" onchange="assignGroup(${i}, this.value)"><option value="" ${(!user.group || isLegacyPersonalGroup(user.group)) ? 'selected' : ''}>${isLegacyPersonalGroup(user.group) ? 'Lab Personal PC (choose type)' : '(none)'}</option>${groupOpts(user.group)}</select></div>
     <div><label for="studentType">Student type</label><select id="studentType" onchange="assignStudentType(${i}, this.value)"><option value="">(none)</option>${studentTypes().map(type => `<option value="${esc(type)}" ${category === type ? 'selected' : ''}>${esc(type)}</option>`).join('')}</select></div></div>
+    <button class="sm" onclick="composeUpdate('p:${esc(user.sn)}')">Send a message</button>
     <button class="sm" onclick="resetStudent(${i})">Reset password</button>
     <button class="sm alt" onclick="deleteStudent('${esc(user.sn)}')">Delete login and profile</button>
     <button class="sm alt" onclick="selectedStudentSn = ''; render()">Close details</button></div>`;
@@ -779,7 +911,6 @@ function adminView() {
     { id: 'settings', label: 'PC settings', permission: 'settings' },
     { id: 'location', label: 'Lab location', permission: 'settings' },
     { id: 'groups', label: 'Groups', permission: 'groups' },
-    { id: 'student-types', label: 'Student types', permission: 'groups' },
     { id: 'personal-pcs', label: 'PC numbers', permission: 'settings' },
     { id: 'mark-personal', label: 'Mark personal PC', permission: 'attendance' },
     { id: 'personal-week', label: 'Personal PC this week', permission: 'attendance' },
@@ -793,6 +924,7 @@ function adminView() {
   if (!sections.some(section => section.id === adminTab)) adminTab = sections[0].id;
   const panel = id => `admin-panel${adminTab === id ? ' active' : ''}`;
   const wk = mondayOf(ymd(new Date())), fri = new Date(wk); fri.setDate(wk.getDate() + 4);
+  const onExports = adminTab === 'exports', exportBounds = rangeBounds(), exportList = onExports ? scopedRecords() : [], exportBuckets = onExports && !range.scope ? scopeBuckets(exportList).filter(x => x.list.length) : [];
   const personal = records().filter(r => isP(r) && !r.excused && r.date >= ymd(wk) && r.date <= ymd(fri))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
   $('app').innerHTML = `
@@ -816,12 +948,7 @@ function adminView() {
     ${(st.groups || []).some(isLegacyPersonalGroup) ? `<p>“${LEGACY_PERSONAL_GROUP}” is treated as a student type category, not a group.</p><button class="sm alt" onclick="removeLegacyPersonalGroup()">Remove legacy group entry</button>` : ''}
     <label for="gn">New group name</label><input id="gn">
     <button onclick="addGroup()">Add group</button></div>
-  ${adminGroupDetails()}</section>` : ''}
-  ${hasPermission('groups') ? `<section class="${panel('student-types')}" role="tabpanel">
-  <div class="card"><h2>Student types</h2><p>For students formerly listed under ${LEGACY_PERSONAL_GROUP}; these are separate from groups.</p>
-    <div class="wrap"><table>${studentTypes().map((type, i) => `<tr><td>${esc(type)}</td><td>${users().filter(u => attendanceTypeForProfile(u) === type).length} students</td><td>${BUILT_IN_STUDENT_TYPES.includes(type) ? 'Built-in' : `<button class="sm alt" onclick="removeStudentType(${i})">Remove</button>`}</td></tr>`).join('')}</table></div>
-    <label for="newStudentType">New student type</label><input id="newStudentType" maxlength="50">
-    <button onclick="addStudentType()">Add student type</button></div></section>` : ''}
+  ${otherGroupsCard()}${adminGroupDetails()}${adminTypeDetails()}</section>` : ''}
   ${hasPermission('settings') ? `<section class="${panel('personal-pcs')}" role="tabpanel"><div class="card"><h2>Personal PC numbers</h2>
     <p>These numbers start at 200. Students who use their own PC pick one of them when they sign.</p>
     ${personalNums().length ? personalNums().map(n => `<span style="margin-right:14px;white-space:nowrap">${n} <button class="sm alt" onclick="removePersonalNum(${n})">Remove</button></span>`).join('') : '<p class="err">No personal numbers yet.</p>'}
@@ -855,31 +982,42 @@ function adminView() {
     <div><label for="studentSearchQuery">Find student</label><input id="studentSearchQuery" value="${esc(studentSearch.query)}" placeholder="Enter a name, number, group, or type"></div></div>
     <button onclick="applyStudentSearch()">Search</button><button class="alt" onclick="clearStudentSearch()">Clear</button>
     ${visibleStudents.length ? `<p>${visibleStudents.length} student(s) found.</p><ul>${visibleStudents.map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students match that search.</p>'}</div></section>` : ''}
-  ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel"><div class="card"><h2>Exports</h2>
+  ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel">${onExports ? exportsCard(exportBounds, exportList, exportBuckets) : ''}</section>` : ''}`;
+}
+function scopeOptionsHtml() {
+  const entries = scopeEntries(records()), opt = e => `<option value="${esc(e.id)}" ${range.scope === e.id ? 'selected' : ''}>${esc(e.label)}</option>`;
+  const gs = entries.filter(e => e.kind === 'group'), ts = entries.filter(e => e.kind === 'type');
+  return `<option value="" ${range.scope ? '' : 'selected'}>Everyone (all groups and student types)</option>
+    ${gs.length ? `<optgroup label="Groups">${gs.map(opt).join('')}</optgroup>` : ''}
+    <optgroup label="Student types (not in a group)">${ts.map(opt).join('')}</optgroup>
+    <option value="none" ${range.scope === 'none' ? 'selected' : ''}>No group / student type</option>`;
+}
+function exportsCard(b, list, buckets) {
+  const people = new Set(list.map(r => r.sn)).size, days = new Set(list.map(r => r.date)).size;
+  return `<div class="card"><h2>Exports</h2>
+    <p>Choose the dates and who to include. Every download below uses these choices.</p>
     <div class="row">
-      <div><label for="rt">Report type</label><select id="rt" onchange="setRange()">
-        <option value="week" ${range.type === 'week' ? 'selected' : ''}>Week (Mon to Fri)</option>
-        <option value="month" ${range.type === 'month' ? 'selected' : ''}>Month</option></select></div>
-      <div><label for="rv">${range.type === 'week' ? 'Any day in the week' : 'Month'}</label>
-        <input id="rv" type="${range.type === 'week' ? 'date' : 'month'}" value="${range.type === 'week' ? range.value : range.value.slice(0, 7)}" onchange="setRange()"></div>
+      <div><label for="rf">From date</label><input id="rf" type="date" value="${esc(b.from)}" onchange="setRange()"></div>
+      <div><label for="rto">To date</label><input id="rto" type="date" value="${esc(b.to)}" onchange="setRange()"></div>
+      <div><label for="rscope">Group / student type</label><select id="rscope" onchange="setRange()">${scopeOptionsHtml()}</select></div>
+      <div><label for="rsort">Sort lists by</label><select id="rsort" onchange="setListSort(this.value)">${sortOptionsHtml(SORT_OPTIONS, listSort)}</select></div>
+      <div><label for="rpsort">Sort people in registers by</label><select id="rpsort" onchange="setRosterSort(this.value)">${sortOptionsHtml(ROSTER_SORT_OPTIONS, rosterSort)}</select></div>
     </div>
-    <button onclick="exportXlsx()">Download PC list (Excel)</button><button onclick="exportPdf()">Download PC list (PDF)</button>
-    <p>${list.length} sign-in(s) in this ${range.type}. The download has the full list.</p>
-    <h3>Word attendance register</h3>
-    <div class="row"><div><label for="wordRegisterType">Student type</label><select id="wordRegisterType" onchange="toggleWordRegisterGroup()">${studentTypes().map(type => `<option value="${esc(type)}">${esc(type)}</option>`).join('')}</select></div>
-    <div id="wordRegisterGroupField"><label for="wordRegisterGroup">Student group</label><select id="wordRegisterGroup">${groups.map(group => `<option value="${esc(group)}">${esc(groupLabel(group))}</option>`).join('')}</select></div></div>
-    <button onclick="exportWordRegister()">Download Word attendance register</button>
-    <p class="download-progress">The Word register contains weekday signatures and no PC numbers. Use the PC list downloads for PC assignments.</p>
-    <div id="wordRegisterStatus" class="download-progress" aria-live="polite"></div>
-    <h3>Group attendance register</h3>
-    <div class="row"><div><label for="groupExport">Group</label><select id="groupExport">${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div></div>
-    <button onclick="exportGroupPdf()" ${groups.length ? '' : 'disabled'}>Download group PC list PDF</button></div></section>` : ''}`;
+    <div>${[['today', 'Today'], ['week', 'This week'], ['lastweek', 'Last week'], ['month', 'This month'], ['lastmonth', 'Last month'], ['last30', 'Last 30 days']].map(([k, label]) => `<button type="button" class="sm alt" onclick="setPreset('${k}')">${label}</button>`).join('')}</div>
+    <p><b>${dayName(b.from)} ${esc(b.from)} to ${dayName(b.to)} ${esc(b.to)}</b> &middot; ${esc(scopeLabel(range.scope))}: ${list.length} sign-in(s), ${people} ${people === 1 ? 'person' : 'people'}, ${days} day(s) with sign-ins.</p>
+    ${buckets.length ? `<div class="wrap"><table><tr><th>Group / type</th><th>Sign-ins</th><th>People</th><th>Lab PCs</th><th>Personal PCs</th><th>Excused</th></tr>${buckets.map(x => `<tr><td>${esc(x.label)}</td><td>${x.list.length}</td><td>${new Set(x.list.map(r => r.sn)).size}</td><td>${x.list.filter(r => !isP(r)).length}</td><td>${x.list.filter(r => isP(r) && !r.excused).length}</td><td>${x.list.filter(r => r.excused).length}</td></tr>`).join('')}<tr><th>Total</th><th>${list.length}</th><th>${people}</th><th></th><th></th><th></th></tr></table></div>` : ''}
+    <h3>Lists</h3>
+    <button onclick="exportXlsx()">Download list (Excel)</button><button onclick="exportPdf()">Download list (PDF)</button>
+    <p class="download-progress">${range.scope ? 'Excel has a Register sheet and a By person sheet (one row per person, one column per day).' : 'Excel has a Summary sheet, the full Register, a By person sheet, and one sheet for every group and student type. The PDF is split by group and student type.'}</p>
+    <h3>Registers</h3>
+    <button onclick="exportWordRegister()">Download Word attendance register</button><button onclick="exportGroupPdf()">Download signature register (PDF)</button><button class="alt" onclick="exportAllWordRegisters()">Download all Word registers (ZIP)</button>
+    <p class="download-progress">The Word register has one table per week (Monday to Friday) with signatures and no PC numbers. Pick one group or student type above for a single register, or use the ZIP to get every group and student type at once.</p>
+    <div id="exportStatus" class="download-progress" aria-live="polite"></div></div>`;
 }
   function setAdminTab(tabId) { adminTab = tabId; render(); }
 let dayView = { date: ymd(new Date()), mode: 'all' };
 function dayCard() {
-  const recs = records().filter(r => r.date === dayView.date)
-    .sort((a, b) => String(a.pc).localeCompare(String(b.pc), undefined, { numeric: true }));
+  const recs = sortRecords(records().filter(r => r.date === dayView.date));
   const pers = recs.filter(r => isP(r) && !r.excused).length, exc = recs.filter(r => r.excused).length, names = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
   recs.forEach(r => { if (r.group && !isLegacyPersonalGroup(r.group) && !names.includes(r.group)) names.push(r.group); });
   const cnt = g => recs.filter(r => r.group === g).length, nog = recs.filter(r => (!r.group || isLegacyPersonalGroup(r.group)) && !attendanceStudentType(r)), typed = recs.filter(r => attendanceStudentType(r));
@@ -890,7 +1028,8 @@ function dayCard() {
   else body = names.map(g => `<h3>${esc(groupLabel(g))} (${cnt(g)})</h3>${cnt(g) ? table(recs.filter(r => r.group === g), true) : '<p>Nobody yet.</p>'}`).join('') + studentTypes().filter(type => typed.some(r => attendanceStudentType(r) === type)).map(type => { const list = typed.filter(r => attendanceStudentType(r) === type); return `<h3>Student type: ${esc(type)} (${list.length})</h3>${table(list, true)}`; }).join('') + (nog.length ? `<h3>No group / student type (${nog.length})</h3>${table(nog.filter(r => !attendanceStudentType(r)), true)}` : '');
   return `<div class="card"><h2>Register for a day</h2>
     <div class="row"><div><label for="dd">Date</label><input id="dd" type="date" value="${dayView.date}" onchange="setDay()"></div>
-    <div><label for="dm">View</label><select id="dm" onchange="setDay()"><option value="group" ${dayView.mode === 'group' ? 'selected' : ''}>By group</option><option value="all" ${dayView.mode === 'all' ? 'selected' : ''}>Whole list (with totals)</option></select></div></div>
+    <div><label for="dm">View</label><select id="dm" onchange="setDay()"><option value="group" ${dayView.mode === 'group' ? 'selected' : ''}>By group</option><option value="all" ${dayView.mode === 'all' ? 'selected' : ''}>Whole list (with totals)</option></select></div>
+    <div><label for="ds">Sort by</label><select id="ds" onchange="setListSort(this.value)">${sortOptionsHtml(SORT_OPTIONS, listSort)}</select></div></div>
     <button class="alt" onclick="dayToday()">Go to today</button>
     <p><b>${dayName(dayView.date)}, ${dayView.date}</b>: ${recs.length} signed in (${recs.length - pers - exc} lab PCs, ${pers} personal PCs${exc ? `, ${exc} excused` : ''}).${isWeekday(parse(dayView.date)) ? '' : ' The register is closed on weekends.'}</p>
     ${body}</div>`;
@@ -898,9 +1037,20 @@ function dayCard() {
 function setDay() { dayView.date = $('dd').value || ymd(new Date()); dayView.mode = $('dm').value; render(); }
 function dayToday() { dayView.date = ymd(new Date()); dayView.mode = 'all'; render(); }
 function setRange() {
-  range.type = $('rt').value;
-  const v = $('rv').value;
-  range.value = v ? (v.length === 7 ? v + '-01' : v) : ymd(new Date());
+  range.from = $('rf').value || range.from; range.to = $('rto').value || range.to;
+  if (range.to < range.from) [range.from, range.to] = [range.to, range.from];
+  range.scope = $('rscope').value;
+  render();
+}
+function setPreset(kind) {
+  const today = new Date(), mon = mondayOf(ymd(today)), at = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  let f = today, t = today;
+  if (kind === 'week') { f = mon; t = at(mon, 4); }
+  else if (kind === 'lastweek') { f = at(mon, -7); t = at(mon, -3); }
+  else if (kind === 'month') { f = new Date(today.getFullYear(), today.getMonth(), 1); t = new Date(today.getFullYear(), today.getMonth() + 1, 0); }
+  else if (kind === 'lastmonth') { f = new Date(today.getFullYear(), today.getMonth() - 1, 1); t = new Date(today.getFullYear(), today.getMonth(), 0); }
+  else if (kind === 'last30') { f = at(today, -29); }
+  range.from = ymd(f); range.to = ymd(t);
   render();
 }
 const isAdmin = () => isStaff();
@@ -1010,21 +1160,46 @@ function removeLegacyPersonalGroup() {
   Object.keys(groupWhatsAppLinks).filter(isLegacyPersonalGroup).forEach(g => delete groupWhatsAppLinks[g]);
   saveSettings({ ...settings(), groups: gr, groupYears, groupWhatsAppLinks }).then(() => say('Lab Personal PC removed from the group list. Existing students will choose a student type.', true), () => say('Could not update groups.'));
 }
+const saveTypes = list => saveSettings({ ...settings(), studentTypes: list.filter(type => type && type !== STUDENT_CATEGORY), studentTypesEdited: true });
+const otherTypes = () => studentTypes().filter(type => type !== STUDENT_CATEGORY);
 function addStudentType() {
   if (!hasPermission('groups')) return;
   const type = $('newStudentType').value.trim(), types = studentTypes();
-  if (!type) return say('Type a student type.');
-  if (types.some(x => x.toLowerCase() === type.toLowerCase())) return say('That student type already exists.');
-  saveSettings({ ...settings(), studentTypes: [...types, type] }).then(() => say('Student type added.', true), () => say('Could not save student type.'));
+  if (!type) return say('Type a name.');
+  if (types.some(x => x.toLowerCase() === type.toLowerCase())) return say('That name already exists.');
+  saveTypes([...otherTypes(), type]).then(() => say('Added.', true), () => say('Could not save.'));
 }
-function removeStudentType(i) {
+function removeStudentType() {
   if (!hasPermission('groups')) return;
-  const type = studentTypes()[i];
-  if (!type) return;
-  if (BUILT_IN_STUDENT_TYPES.includes(type)) return say('The required student types cannot be removed.');
-  if (studentTypes().length < 2) return say('Keep at least one student type.');
-  if (users().some(u => u.studentType === type)) return say('Reassign students before removing this type.');
-  saveSettings({ ...settings(), studentTypes: studentTypes().filter((_, index) => index !== i) }).then(() => say('Student type removed.', true), () => say('Could not remove student type.'));
+  const type = selectedType;
+  if (!type || type === STUDENT_CATEGORY) return say('The "Student" type holds the regular groups and cannot be removed.');
+  if (users().some(u => attendanceTypeForProfile(u) === type)) return say('Move the people in this group to another group or type first.');
+  if (!confirm(`Remove "${type}"? Old sign-ins keep this name.`)) return;
+  saveTypes(otherTypes().filter(t => t !== type)).then(() => { selectedType = ''; say('Removed.', true); }, () => say('Could not remove.'));
+}
+async function renameStudentType() {
+  if (!hasPermission('groups')) return;
+  const old = selectedType, name = $('typeName').value.trim();
+  if (!old || old === STUDENT_CATEGORY) return say('The "Student" type holds the regular groups and cannot be renamed.');
+  if (!name) return say('Type a name.');
+  if (name === old) return say('That is already its name.');
+  if (studentTypes().some(t => t.toLowerCase() === name.toLowerCase() && t !== old)) return say('That name already exists.');
+  if (!confirm(`Rename "${old}" to "${name}"? This also updates the people, old sign-ins and updates that use it.`)) return;
+  const ops = [];
+  C.users.filter(u => u.studentType === old).forEach(u => ops.push({ ref: fs.collection('users').doc(u.sn), data: { studentType: name } }));
+  C.records.filter(r => r.studentType === old && r.id).forEach(r => ops.push({ ref: fs.collection('records').doc(r.id), data: { studentType: name } }));
+  C.zipReplies.filter(r => r.studentType === old && r.id).forEach(r => ops.push({ ref: fs.collection('zipReplies').doc(r.id), data: { studentType: name } }));
+  C.updates.filter(x => x.audience === 't:' + old && x.id).forEach(x => ops.push({ ref: fs.collection('updates').doc(x.id), data: { audience: 't:' + name } }));
+  try {
+    for (let offset = 0; offset < ops.length; offset += 400) {
+      const batch = fs.batch();
+      ops.slice(offset, offset + 400).forEach(op => batch.update(op.ref, op.data));
+      await batch.commit();
+    }
+    await saveTypes(otherTypes().map(t => t === old ? name : t));
+    selectedType = name;
+    say(`Renamed to "${name}".`, true);
+  } catch (e) { say('Could not finish renaming. Nothing was lost; try again.'); }
 }
 async function markPersonal() {
   if (!hasPermission('attendance')) return;
@@ -1338,7 +1513,7 @@ async function uploadFile(path, file) {
 }
 function updateCard(item, admin) {
   const fileLinks = (item.files || []).map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.name)}</a>${f.size ? ` (${(f.size / 1048576).toFixed(1)} MB)` : ''}`).join('<br>');
-  return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(item.group ? groupLabel(item.group) : 'All students')} · ${new Date(item.created).toLocaleString()}</small>
+  return `<div class="rep"><b>${esc(item.title)}</b> <small>${esc(updateAudienceLabel(item))} · ${new Date(item.created).toLocaleString()}</small>
     ${item.message ? `<p>${esc(item.message).replace(/\n/g, '<br>')}</p>` : ''}${fileLinks ? `<p>${fileLinks}</p>` : ''}
     ${admin ? `<button class="sm alt" onclick="deleteUpdate('${item.id}')">Delete</button>` : ''}</div>`;
 }
@@ -1350,14 +1525,15 @@ function zipReplyCard(reply) {
 }
 function updatesView(staff) {
   const canManage = staff && hasPermission('updates');
-  const group = assignedGroup() || myGroup;
+  const profile = staff ? {} : studentProfile();
   const replies = C.zipReplies.slice().sort((a, b) => b.created - a.created);
-  const visible = C.updates.filter(x => staff || !x.group || x.group === 'All students' || x.group === group)
+  const visible = C.updates.filter(x => staff || updateVisibleTo(x, profile))
     .sort((a, b) => b.created - a.created);
-  $('app').innerHTML = `${canManage ? `<div class="card"><h2>Share with students</h2>
+  $('app').innerHTML = `${canManage ? `<div class="card"><h2>Send an update or message</h2>
     <label for="ut">Title</label><input id="ut" maxlength="120">
     <label for="um">Announcement</label><textarea id="um" rows="4" maxlength="2000"></textarea>
-    <label for="ug">Send to</label><select id="ug"><option value="All students">All students (every group)</option>${(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select>
+    <label for="ug">Send to</label><select id="ug" onchange="$('upersonWrap').hidden = this.value !== 'person'">${updateTargetOptions()}</select>
+    <div id="upersonWrap" ${updateTarget.startsWith('p:') ? '' : 'hidden'}><label for="uperson">Person (type a name or student number)</label><input id="uperson" list="upeople" autocomplete="off" value="${esc(updatePersonText())}"><datalist id="upeople">${users().slice().sort((a, b) => cmpText(a.name, b.name)).map(u => `<option value="${esc(u.name)} (${esc(u.sn)})"></option>`).join('')}</datalist></div>
     <label for="uf">Attach files (images/documents up to 10 MB each, or ZIP up to 300 MB)</label><input id="uf" type="file" accept="image/*,.pdf,.doc,.docx,.zip,application/zip,application/x-zip-compressed" multiple>
     <button id="publishUpdateBtn" onclick="publishUpdate()">Publish</button><div id="uploadStatus" class="msg"></div><div class="msg err">${msg}</div></div>` : `<div class="card"><h2>Send a ZIP to the admin</h2>
     <p>Send one ZIP file, up to 300 MB. The admin will see your name and group or student type.</p>
@@ -1366,9 +1542,52 @@ function updatesView(staff) {
     <div class="card"><h2>${staff ? 'Published updates' : 'Announcements and documents'}</h2>${updatesError ? `<p class="err">${esc(updatesError)}</p>` : ''}${visible.length ? visible.map(x => updateCard(x, canManage)).join('') : '<p>No updates yet.</p>'}</div>`;
   if (canManage) $('app').insertAdjacentHTML('beforeend', `<div class="card"><h2>ZIP files from students</h2>${zipRepliesError ? `<p class="err">${esc(zipRepliesError)}</p>` : ''}${replies.length ? replies.map(zipReplyCard).join('') : '<p>No ZIP files received.</p>'}</div>`);
 }
+let updateTarget = '';
+function composeUpdate(target) { updateTarget = target || ''; if (location.hash === '#updates') render(); else location.hash = '#updates'; }
+function updateAudience(x) {
+  if (x.audience) return x.audience;
+  return !x.group || x.group === 'All students' ? 'all' : 'g:' + x.group;
+}
+function updateAudienceLabel(x) {
+  const a = updateAudience(x);
+  if (a === 'all') return 'All students';
+  if (a.startsWith('g:')) return groupLabel(a.slice(2));
+  if (a.startsWith('t:')) return a.slice(2);
+  if (a.startsWith('p:')) return 'Only ' + (x.recipientName || a.slice(2));
+  return 'All students';
+}
+function updateVisibleTo(x, profile) {
+  const a = updateAudience(x);
+  if (a === 'all') return true;
+  if (!session) return false;
+  if (a.startsWith('p:')) return a.slice(2) === session.sn;
+  if (a.startsWith('t:')) return attendanceTypeForProfile(profile) === a.slice(2);
+  if (a.startsWith('g:')) return a.slice(2) === (assignedGroup() || myGroup);
+  return false;
+}
+function updateTargetOptions() {
+  const sel = updateTarget.startsWith('p:') ? 'person' : updateTarget, opt = (value, label) => `<option value="${esc(value)}" ${sel === value ? 'selected' : ''}>${esc(label)}</option>`;
+  const groups = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g)), types = studentTypes().filter(t => t !== STUDENT_CATEGORY);
+  return opt('all', 'Everyone (all groups and student types)') +
+    (groups.length ? `<optgroup label="Groups">${groups.map(g => opt('g:' + g, groupLabel(g))).join('')}</optgroup>` : '') +
+    (types.length ? `<optgroup label="Other groups (student types)">${types.map(t => opt('t:' + t, t)).join('')}</optgroup>` : '') +
+    opt('person', 'One person only...');
+}
+function updatePersonText() {
+  const u = updateTarget.startsWith('p:') ? users().find(x => x.sn === updateTarget.slice(2)) : null;
+  return u ? `${u.name} (${u.sn})` : '';
+}
 async function publishUpdate() {
   if (!hasPermission('updates') || uploadBusy) return;
-  const title = $('ut').value.trim(), message = $('um').value.trim(), group = $('ug').value, filesToUpload = [...$('uf').files];
+  const title = $('ut').value.trim(), message = $('um').value.trim(), target = $('ug').value, filesToUpload = [...$('uf').files];
+  let audience = target || 'all', recipientName = '';
+  if (target === 'person') {
+    const typed = $('uperson').value.trim().toLowerCase();
+    const person = typed && users().find(x => `${x.name} (${x.sn})`.toLowerCase() === typed || String(x.sn).toLowerCase() === typed);
+    if (!person) return say('Choose a person from the list, or type their student number.');
+    audience = 'p:' + person.sn; recipientName = person.name;
+  }
+  const group = audience === 'all' ? 'All students' : audience.startsWith('g:') ? audience.slice(2) : '__targeted__'; // old app copies hide anything they cannot place
   if (!title) return say('Add a title.');
   if (!message && !filesToUpload.length) return say('Add an announcement or attach a document.');
   if (!(await Promise.all(filesToUpload.map(validUpdateFile))).every(Boolean)) return say('Choose valid images/documents up to 10 MB or ZIP files up to 300 MB.');
@@ -1383,8 +1602,8 @@ async function publishUpdate() {
         files.push(await uploadZipFile(`updates/${id}`, file, (sent, total) => { status.textContent = `Uploading ${file.name}: ${Math.round(sent * 100 / total)}%`; }));
       } else files.push(await uploadFile(`updates/${id}`, file));
     }
-    await fs.collection('updates').doc(id).set({ id, title, message, group, files, created: Date.now(), createdBy: session.user });
-    msg = ''; render();
+    await fs.collection('updates').doc(id).set({ id, title, message, group, audience, recipientName, files, created: Date.now(), createdBy: session.user });
+    msg = ''; updateTarget = ''; render();
   } catch (e) {
     await Promise.all(files.map(f => storage.ref(f.path).delete().catch(() => {})));
     say('Could not publish. Check Firebase Storage is enabled and try again.');
@@ -1457,12 +1676,17 @@ async function delReport(id) {
 }
 
 /* ---------- Downloads ---------- */
+const safeName = value => String(value || 'file').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '');
+const setExportStatus = text => { const el = $('exportStatus'); if (el) el.textContent = text; };
 function reportName() {
-  if (range.type === 'week') { const m = mondayOf(range.value), f = new Date(m); f.setDate(m.getDate() + 4); return `WM-LPR-week-${ymd(m)}-to-${ymd(f)}`; }
-  return `WM-LPR-month-${range.value.slice(0, 7)}`;
+  const b = rangeBounds();
+  return b.from === b.to ? `WM-LPR-${b.from}` : `WM-LPR-${b.from}-to-${b.to}`;
 }
-const rows = () => inRange().map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? noPcText(r) : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
+const exportBase = () => reportName() + (range.scope ? '-' + safeName(scopeLabel(range.scope)) : '');
+const periodLabel = () => { const b = rangeBounds(); return b.from === b.to ? b.from : `${b.from} to ${b.to}`; };
+const rowsFor = list => list.map(r => [r.date, dayName(r.date), r.sn, r.name, attendanceCategory(r), pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? noPcText(r) : 'Not returned'), r.signature ? 'Captured' : 'Not captured']);
 const HEAD = ['Date', 'Day', 'Student no.', 'Name', 'Group / type', 'PC', 'Signed in', 'Returned at / staff', 'Signature'];
+const HEAD_WIDTHS = [12, 11, 14, 26, 20, 12, 12, 22, 16];
 function pcListSummary(list) {
   const assigned = list.filter(record => hasRecordedPc(record.pc) && !record.excused);
   const labAssignments = assigned.filter(record => !isP(record));
@@ -1470,21 +1694,72 @@ function pcListSummary(list) {
   const personalAssignments = assigned.length - labAssignments.length;
   return `PC assignments: ${assigned.length} | Unique lab PCs: ${uniqueLabPcs} | Personal PC assignments: ${personalAssignments}`;
 }
+function safeSheet(name, used) {
+  const base = String(name).replace(/[\\/?*\[\]:]/g, '-').trim().slice(0, 28) || 'Sheet';
+  let n = base, i = 2;
+  while (used.has(n.toLowerCase())) n = base.slice(0, 26) + ' ' + i++;
+  used.add(n.toLowerCase());
+  return n;
+}
+/* One row per person, one column per day, so a week or month reads as a single grid. */
+function personMatrix(list) {
+  const b = rangeBounds(), set = new Set();
+  for (let d = parse(b.from); ymd(d) <= b.to && set.size < 400; d.setDate(d.getDate() + 1)) if (isWeekday(d)) set.add(ymd(d));
+  list.forEach(r => set.add(r.date));
+  const dates = [...set].sort(), people = new Map();
+  users().filter(u => userInScope(range.scope, u)).forEach(u => people.set(u.sn, { sn: u.sn, name: u.name, category: u.group ? groupLabel(u.group) : (attendanceTypeForProfile(u) || '') }));
+  list.forEach(r => { if (!people.has(r.sn)) people.set(r.sn, { sn: r.sn, name: r.name, category: attendanceCategory(r) }); });
+  const head = ['Student no.', 'Name', 'Group / type', 'Days signed in', ...dates.map(d => `${dayName(d).slice(0, 3)} ${d}`)];
+  const body = [...people.values()].sort((a, c) => String(a.name).localeCompare(String(c.name))).map(p => {
+    const byDate = new Map(list.filter(r => r.sn === p.sn).map(r => [r.date, r]));
+    return [p.sn, p.name, p.category, byDate.size, ...dates.map(d => byDate.has(d) ? pcLabel(byDate.get(d)) : '')];
+  });
+  return [head, ...body];
+}
 function exportXlsx() {
   if (!hasPermission('attendance')) return;
-  const ws = XLSX.utils.aoa_to_sheet([HEAD, ...rows()]);
-  ws['!cols'] = [{wch:12},{wch:11},{wch:14},{wch:26},{wch:20},{wch:12},{wch:12},{wch:22},{wch:16}];
-  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Register');
-  XLSX.writeFile(wb, reportName() + '.xlsx');
+  const list = scopedRecords();
+  if (!list.length) return setExportStatus('There are no sign-ins for those dates and that group / type.');
+  const wb = XLSX.utils.book_new(), used = new Set();
+  const add = (name, aoa, widths) => {
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    if (widths) ws['!cols'] = widths.map(wch => ({ wch }));
+    XLSX.utils.book_append_sheet(wb, ws, safeSheet(name, used));
+  };
+  const buckets = range.scope ? [] : scopeBuckets(list).filter(x => x.list.length);
+  if (buckets.length) {
+    add('Summary', [
+      ['Period', periodLabel()], [],
+      ['Group / type', 'Sign-ins', 'People', 'Lab PCs', 'Personal PCs', 'Excused'],
+      ...buckets.map(x => [x.label, x.list.length, new Set(x.list.map(r => r.sn)).size, x.list.filter(r => !isP(r)).length, x.list.filter(r => isP(r) && !r.excused).length, x.list.filter(r => r.excused).length]),
+      ['Total', list.length, new Set(list.map(r => r.sn)).size, list.filter(r => !isP(r)).length, list.filter(r => isP(r) && !r.excused).length, list.filter(r => r.excused).length]
+    ], [30, 12, 10, 10, 14, 10]);
+  }
+  add('Register', [HEAD, ...rowsFor(list)], HEAD_WIDTHS);
+  add('By person', personMatrix(list), [14, 26, 20, 14]);
+  buckets.forEach(x => add(x.label, [HEAD, ...rowsFor(x.list)], HEAD_WIDTHS));
+  XLSX.writeFile(wb, exportBase() + '.xlsx');
+  setExportStatus('Excel file downloaded.');
 }
 function exportPdf() {
   if (!hasPermission('attendance')) return;
-  const list = inRange();
+  const list = scopedRecords();
+  if (!list.length) return setExportStatus('There are no sign-ins for those dates and that group / type.');
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
-  doc.setFontSize(14); doc.text('WM-LPR: ' + reportName().replace('WM-LPR-', ''), 14, 14);
+  doc.setFontSize(14); doc.text(`WM-LPR: ${scopeLabel(range.scope)}, ${periodLabel()}`, 14, 14);
   doc.setFontSize(9); doc.text(pcListSummary(list), 14, 20);
-  doc.autoTable({ head: [HEAD], body: rows(), startY: 25, styles: { fontSize: 9 } });
-  doc.save(reportName() + '.pdf');
+  const parts = range.scope ? [{ label: '', list }] : scopeBuckets(list).filter(x => x.list.length);
+  let y = 25;
+  parts.forEach(part => {
+    if (part.label) {
+      if (y > 175) { doc.addPage(); y = 15; }
+      doc.setFontSize(11); doc.text(`${part.label} (${part.list.length})`, 14, y + 4); y += 7;
+    }
+    doc.autoTable({ head: [HEAD], body: rowsFor(part.list), startY: y, styles: { fontSize: 9 } });
+    y = doc.lastAutoTable.finalY + 10;
+  });
+  doc.save(exportBase() + '.pdf');
+  setExportStatus('PDF downloaded.');
 }
 let docxLoadPromise = null;
 async function ensureDocxLibrary() {
@@ -1514,10 +1789,6 @@ async function ensureDocxLibrary() {
   })();
   return docxLoadPromise;
 }
-function toggleWordRegisterGroup() {
-  const field = $('wordRegisterGroupField');
-  if (field) field.hidden = $('wordRegisterType').value !== STUDENT_CATEGORY;
-}
 function wordCategoryForUser(user) {
   return attendanceTypeForProfile(user);
 }
@@ -1528,19 +1799,16 @@ function wordCategoryForRecord(record) {
   return profile ? wordCategoryForUser(profile) : '';
 }
 function matchesWordRegister(record, type, group) {
-  return wordCategoryForRecord(record) === type && (type !== STUDENT_CATEGORY || record.group === group);
+  return wordCategoryForRecord(record) === type && (type !== STUDENT_CATEGORY || !group || record.group === group);
 }
 function wordRegisterRoster(type, group, registerRecords) {
   const roster = new Map();
-  users().filter(user => wordCategoryForUser(user) === type && (type !== STUDENT_CATEGORY || user.group === group))
+  users().filter(user => wordCategoryForUser(user) === type && (type !== STUDENT_CATEGORY || !group || user.group === group))
     .forEach(user => roster.set(user.sn, user));
   registerRecords.filter(record => matchesWordRegister(record, type, group)).forEach(record => {
     if (!roster.has(record.sn)) roster.set(record.sn, { sn: record.sn, name: record.name });
   });
-  return [...roster.values()].sort((a, b) => {
-    const surname = value => String(value.surname || value.name || '').trim().split(/\s+/).pop().toLowerCase();
-    return surname(a).localeCompare(surname(b)) || String(a.name).localeCompare(String(b.name));
-  });
+  return sortPeople([...roster.values()]);
 }
 function wordNameParts(person) {
   const names = String(person.name || '').trim().split(/\s+/).filter(Boolean);
@@ -1610,15 +1878,12 @@ function buildWordRegisterTable(roster, recordsForRange, weekStartDate) {
 async function buildWordRegister(type, group) {
   const registerRecords = inRange().filter(record => matchesWordRegister(record, type, group));
   const roster = wordRegisterRoster(type, group, registerRecords);
-  const start = range.type === 'week' ? mondayOf(range.value) : mondayOf(`${range.value.slice(0, 7)}-01`);
-  const end = range.type === 'week' ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 4)
-    : new Date(Number(range.value.slice(0, 4)), Number(range.value.slice(5, 7)), 0);
-  const title = type === STUDENT_CATEGORY ? groupLabel(group) : type;
-  const monthTitle = new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(parse(`${range.value.slice(0, 7)}-01`));
-  const periodTitle = range.type === 'month' ? monthTitle : reportName().replace('WM-LPR-', '');
+  const b = rangeBounds(), start = mondayOf(b.from), end = parse(b.to);
+  const title = type === STUDENT_CATEGORY ? (group ? groupLabel(group) : 'All students') : type;
   const children = [
     new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: `${title.toUpperCase()} ATTENDANCE REGISTER`, bold: true, size: 28 })] }),
-    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: periodTitle, bold: true, size: 22 })] })
+    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: periodLabel(), bold: true, size: 22 })] }),
+    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: `${roster.length} ${roster.length === 1 ? 'learner' : 'learners'} in this register`, size: 20 })] })
   ];
   let week = new Date(start), weekNumber = 1;
   while (week <= end) {
@@ -1639,47 +1904,88 @@ async function buildWordRegister(type, group) {
   });
   return docx.Packer.toBlob(document);
 }
+function scopeToWord(scope) {
+  if (scope && scope.startsWith('g:')) return { type: STUDENT_CATEGORY, group: scope.slice(2) };
+  if (scope && scope.startsWith('t:')) return { type: scope.slice(2), group: '' };
+  return null;
+}
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
 async function exportWordRegister() {
   if (!hasPermission('attendance')) return;
-  const status = $('wordRegisterStatus'), type = $('wordRegisterType').value;
-  const group = type === STUDENT_CATEGORY ? $('wordRegisterGroup').value : '';
-  if (type === STUDENT_CATEGORY && !group) { status.textContent = 'Choose a student group first.'; return; }
-  status.textContent = 'Preparing the attendance register...';
+  const target = scopeToWord(range.scope);
+  if (!target) { setExportStatus(range.scope === 'none' ? 'People without a group or student type have no register. Choose a group or student type.' : 'Choose a group or student type above, or use "Download all Word registers (ZIP)".'); return; }
+  setExportStatus('Preparing the attendance register...');
   try {
     await ensureDocxLibrary();
-    const blob = await buildWordRegister(type, group), url = URL.createObjectURL(blob), link = document.createElement('a');
-    const monthTitle = new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(parse(`${range.value.slice(0, 7)}-01`));
-    const period = range.type === 'month' ? monthTitle : reportName().replace('WM-LPR-', '');
-    const name = `${type === STUDENT_CATEGORY ? groupLabel(group) : type}-${period}`.replace(/[^a-z0-9_-]+/gi, '-');
-    link.href = url; link.download = `${name}-WM-LPR.docx`;
-    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
-    status.textContent = 'Word attendance register downloaded.';
-  } catch (e) { status.textContent = 'Could not load the Word library or create the register. Check your connection and try again.'; }
+    const blob = await buildWordRegister(target.type, target.group);
+    saveBlob(blob, `${safeName(scopeLabel(range.scope))}-${safeName(periodLabel())}-WM-LPR.docx`);
+    setExportStatus('Word attendance register downloaded.');
+  } catch (e) { setExportStatus('Could not load the Word library or create the register. Check your connection and try again.'); }
+}
+async function exportAllWordRegisters() {
+  if (!hasPermission('attendance')) return;
+  setExportStatus('Preparing all attendance registers...');
+  try {
+    await ensureDocxLibrary();
+    const zip = new JSZip(), inDates = inRange();
+    let count = 0;
+    for (const entry of scopeEntries(inDates).filter(e => !e.aggregate)) {
+      const target = scopeToWord(entry.id), matching = inDates.filter(r => matchesWordRegister(r, target.type, target.group));
+      if (!wordRegisterRoster(target.type, target.group, matching).length) continue;
+      zip.file(`${safeName(entry.label)}-${safeName(periodLabel())}-WM-LPR.docx`, await buildWordRegister(target.type, target.group));
+      count++;
+    }
+    if (!count) { setExportStatus('There are no groups or student types with people to put in a register.'); return; }
+    saveBlob(await zip.generateAsync({ type: 'blob' }), `WM-LPR-all-registers-${safeName(periodLabel())}.zip`);
+    setExportStatus(`Downloaded ${count} register(s) in one ZIP file.`);
+  } catch (e) { setExportStatus('Could not create the registers. Check your connection and try again.'); }
 }
 function exportGroupPdf() {
   if (!hasPermission('attendance')) return;
-  const group = $('groupExport').value, groupRows = inRange().filter(r => r.group === group);
+  if (range.scope === 'none') return setExportStatus('People without a group or student type have no register. Choose a group or student type.');
+  const inDates = inRange(), b = rangeBounds();
+  const targets = range.scope
+    ? [{ ...scopeToWord(range.scope), label: scopeLabel(range.scope) }]
+    : scopeEntries(inDates).filter(e => !e.aggregate).map(e => ({ ...scopeToWord(e.id), label: e.label }));
   const doc = new jspdf.jsPDF({ orientation: 'landscape' });
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text(groupLabel(group), 14, 15);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text('Attendance register: ' + reportName().replace('WM-LPR-', ''), 14, 21);
-  doc.setFontSize(9); doc.text(pcListSummary(groupRows), 14, 27);
-  doc.autoTable({
-    head: [['Date', 'Day', 'Student no.', 'Name', 'PC', 'Signed in', 'Returned at', 'Signature']],
-    body: groupRows.map(r => [r.date, dayName(r.date), r.sn, r.name, pcLabel(r), r.time, r.returnedAt ? `${new Date(r.returnedAt).toLocaleString()}${r.returnedBy ? `; marked by ${r.returnedBy}` : '; staff not recorded'}` : (isP(r) ? noPcText(r) : 'Not returned'), '']),
-    startY: 33,
-    styles: { fontSize: 8, minCellHeight: 18 },
-    columnStyles: { 7: { cellWidth: 40 } },
-    didDrawCell(data) {
-      if (data.section !== 'body' || data.column.index !== 7) return;
-      const signature = groupRows[data.row.index].signature;
-      if (signature) doc.addImage(signature, 'PNG', data.cell.x + 1, data.cell.y + 2, 34, 13);
+  let pages = 0;
+  targets.forEach(target => {
+    const registerRecords = inDates.filter(r => matchesWordRegister(r, target.type, target.group));
+    const roster = wordRegisterRoster(target.type, target.group, registerRecords);
+    if (!roster.length) return;
+    for (const week = mondayOf(b.from); week <= parse(b.to); week.setDate(week.getDate() + 7)) {
+      const days = [0, 1, 2, 3, 4].map(i => { const d = new Date(week); d.setDate(week.getDate() + i); return ymd(d); });
+      const weekRecords = registerRecords.filter(r => r.date >= days[0] && r.date <= days[4]);
+      if (pages++) doc.addPage();
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.text(`${target.label} attendance register`, 14, 14);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text(`Week ${days[0]} to ${days[4]}  |  ${roster.length} ${roster.length === 1 ? 'person' : 'people'} in this register`, 14, 20);
+      doc.autoTable({
+        head: [['#', 'Names', 'Surname', 'ID number', ...['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map((n, i) => `${n} ${days[i].slice(5)}`)]],
+        body: roster.map((person, i) => {
+          const parts = wordNameParts(person);
+          return [i + 1, parts.firstNames, parts.surname, person.sn, ...days.map(d => { const r = weekRecords.find(x => x.sn === person.sn && x.date === d); return r && r.excused ? 'Excused' : ''; })];
+        }),
+        startY: 25,
+        styles: { fontSize: 8, minCellHeight: 14, valign: 'middle' },
+        columnStyles: { 0: { cellWidth: 8 }, 4: { cellWidth: 30 }, 5: { cellWidth: 30 }, 6: { cellWidth: 30 }, 7: { cellWidth: 30 }, 8: { cellWidth: 30 } },
+        didDrawCell(data) {
+          if (data.section !== 'body' || data.column.index < 4) return;
+          const person = roster[data.row.index], r = weekRecords.find(x => x.sn === person.sn && x.date === days[data.column.index - 4]);
+          if (r && r.signature && r.signature.startsWith('data:image/')) { try { doc.addImage(r.signature, 'PNG', data.cell.x + 2, data.cell.y + 2, 26, 10); } catch (e) { /* skip unreadable signature */ } }
+        }
+      });
     }
   });
-  const filename = groupLabel(group).replace(/[^a-z0-9_-]+/gi, '-');
-  doc.save(`${filename}-${reportName()}.pdf`);
+  if (!pages) return setExportStatus('There are no people to put in a register for those dates and that group / type.');
+  doc.save(`${exportBase()}-register.pdf`);
+  setExportStatus('Signature register downloaded.');
 }
 
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-e'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-g'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
