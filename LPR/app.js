@@ -221,6 +221,11 @@ function saveFail(e, what = 'save') {
   if (code === 'resource-exhausted') { const r = quotaResetInfo(); return `Please try again at ${r.clock} ${r.day}.`; }
   if (code === 'permission-denied') return `Could not ${what}: the database refused it (permission-denied). This is not your internet. The admin must check the Firebase rules (Firestore Database > Rules), because they may have expired.`;
   if (code === 'unavailable' || code === 'deadline-exceeded') return `Could not ${what}: cannot reach the database right now (${code}). Check your internet and try again.`;
+  if (code === 'storage/unauthorized' || code === 'storage/unauthenticated') return `Could not ${what}: file storage refused the upload (${code}). This is not your internet. The admin must check the Firebase rules (Storage > Rules), because they may have expired.`;
+  if (code === 'storage/quota-exceeded') return `Could not ${what}: the file storage is full (${code}). Please tell the admin.`;
+  if (code === 'storage/retry-limit-exceeded' || code === 'storage/canceled') return `Could not ${what}: the upload took too long (${code}). Check your internet, or try a smaller file.`;
+  if (code === 'storage/bucket-not-found' || code === 'storage/project-not-found' || code === 'storage/invalid-argument') return `Could not ${what}: file storage is not set up correctly (${code}). Please tell the admin.`;
+  if (!code && /reading 'ref'|storage is (null|not)/i.test(text)) return `Could not ${what}: file storage did not load. Check your internet, refresh the page and try again.`;
   if (code === 'not-found') return `Could not ${what}: your account was not found in the database (not-found). Please ask an admin.`;
   return `Could not ${what} (${code || text || 'unknown error'}). If this keeps happening, send this message to the admin.`;
 }
@@ -1536,21 +1541,43 @@ function studentReports() {
     <div><label for="rd">Date</label><input id="rd" type="date" value="${ymd(new Date())}"></div></div>
     <label for="rr">Reason</label><textarea id="rr" rows="4" maxlength="500"></textarea>
     <label for="rf">Supporting documents (optional; images, PDF, or Word documents, up to 10 MB each)</label><input id="rf" type="file" accept="image/*,.pdf,.doc,.docx" multiple>
-    <button onclick="sendReport()">Send report</button><div class="msg err">${msg}</div></div>
+    <button id="sendReportBtn" onclick="sendReport()">Send report</button><div id="reportStatus" class="msg err" aria-live="polite">${msg}</div></div>
   <div class="card"><h2>My reports</h2>${mine.length ? mine.map(r => reportCard(r, false)).join('') : '<p>You have no reports.</p>'}</div>`;
   showQuota();
 }
+let reportSending = false;
+function reportStatus(html, ok) {
+  msg = ok ? `<span class="good">${html}</span>` : html;
+  const el = $('reportStatus');
+  if (el) el.innerHTML = msg; // update in place so the student keeps what they typed and the files they chose
+}
 async function sendReport() {
-  const type = $('rk').value, date = $('rd').value, reason = $('rr').value.trim();
-  const files = [...$('rf').files];
-  if (!date || !isWeekday(parse(date))) return say('Choose a day from Monday to Friday.');
-  if (reason.length < 5) return say('Please write a reason (at least 5 characters).');
-  if (files.some(file => !validUpload(file))) return say('Choose images, PDFs, or Word documents no larger than 10 MB each.');
+  if (reportSending) return;
+  const type = $('rk').value, date = $('rd').value;
+  let reason = $('rr').value.trim();
+  const files = [...$('rf').files], button = $('sendReportBtn');
+  if (!date || !isWeekday(parse(date))) return reportStatus('Choose a day from Monday to Friday.');
+  if (reason.length < 5) return reportStatus('Please write a reason (at least 5 characters).');
+  if (files.some(file => !validUpload(file))) return reportStatus('Choose images, PDFs, or Word documents no larger than 10 MB each.');
+  if (files.length && !storage) return reportStatus('File upload did not load. Check your internet, refresh the page and try again.');
   const now = Date.now(), id = `${session.sn}_${now}`;
   const logRef = fs.collection('reportlog').doc(session.sn), repRef = fs.collection('reports').doc(id);
   let attachments = [];
+  reportSending = true; if (button) button.disabled = true;
   try {
-    for (const file of files) attachments.push(await uploadFile(`reports/${session.sn}/${id}`, file));
+    try {
+      for (let n = 0; n < files.length; n++) {
+        reportStatus(`Uploading ${n + 1} of ${files.length}: ${esc(files[n].name)}. Please wait...`, true);
+        attachments.push(await uploadFile(`reports/${session.sn}/${id}`, files[n]));
+      }
+    } catch (e) {
+      await Promise.all(attachments.map(f => storage.ref(f.path).delete().catch(() => {})));
+      attachments = [];
+      const why = saveFail(e, 'upload the attachment');
+      if (!confirm(`${why}\n\nDo you want to send the report without the attachment${files.length > 1 ? 's' : ''}?`)) { reportStatus(esc(why)); return; }
+      reason = `${reason} (The student tried to attach ${files.length} file${files.length > 1 ? 's' : ''}, but the upload failed.)`;
+    }
+    reportStatus('Sending your report...', true);
     await fs.runTransaction(async tx => {
       const d = await tx.get(logRef), times = d.exists ? d.data().times : [], u = usage(times, now);
       if (u.w >= LIMIT_WEEK) throw new Error('week');
@@ -1561,10 +1588,10 @@ async function sendReport() {
     say('Report sent. The admin will approve or reject it.', true);
   } catch (e) {
     await Promise.all(attachments.map(f => storage.ref(f.path).delete().catch(() => {})));
-    say(e.message === 'week' ? `You already sent ${LIMIT_WEEK} reports this week. You can send again from next Monday.`
+    reportStatus(esc(e.message === 'week' ? `You already sent ${LIMIT_WEEK} reports this week. You can send again from next Monday.`
       : e.message === 'month' ? `You already sent ${LIMIT_MONTH} reports this month. You can send again next month.`
-      : saveFail(e, 'send the report'));
-  }
+      : saveFail(e, 'send the report')));
+  } finally { reportSending = false; const b = $('sendReportBtn'); if (b) b.disabled = false; }
 }
 const LIMIT_WEEK = 2, LIMIT_MONTH = 3;
 const weekStart = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); };
@@ -1774,7 +1801,7 @@ async function sendZipReply() {
     msg = ''; render();
   } catch (e) {
     if (uploaded) await storage.ref(uploaded.path).delete().catch(() => {});
-    say('Could not send the ZIP. Check Firebase Storage and Firestore rules, then try again.');
+    say(esc(saveFail(e, 'send the ZIP')));
   } finally { uploadBusy = false; }
 }
 async function deleteZipReply(id) {
@@ -2141,4 +2168,4 @@ function exportGroupPdf() {
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-h'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-i'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
