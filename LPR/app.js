@@ -82,7 +82,7 @@ function start() {
     loaded.s = 1; refresh();
   }, fail);
   fs.collection('users').onSnapshot(q => { C.users = q.docs.map(d => d.data()); loaded.u = 1; refresh(); }, fail);
-  fs.collection('records').onSnapshot(q => { C.records = q.docs.map(d => ({ ...d.data(), id: d.data().id || d.id })); loaded.r = 1; refresh(); }, fail);
+  startRecords();
   fs.collection('reports').onSnapshot(q => {
     C.reports = q.docs.map(d => d.data());
     C.reports.filter(x => Date.now() - x.created > WEEK).forEach(x => fs.collection('reports').doc(x.id).delete().catch(() => {}));
@@ -90,6 +90,19 @@ function start() {
   }, fail);
   fs.collection('updates').onSnapshot(q => { C.updates = q.docs.map(d => d.data()); updatesError = ''; refresh(); }, () => { updatesError = 'Updates are unavailable. Check Firestore rules.'; refresh(); });
   fs.collection('zipReplies').onSnapshot(q => { C.zipReplies = q.docs.map(d => d.data()); zipRepliesError = ''; refresh(); }, () => { zipRepliesError = 'ZIP replies are unavailable. Check Firestore rules.'; refresh(); });
+}
+/* Saves Firestore reads: a student only loads today's records and their own records. Admin and staff load everything. */
+let recordUnsubs = [], recordParts = {};
+function startRecords() {
+  recordUnsubs.forEach(stop => stop()); recordUnsubs = []; recordParts = {};
+  if (!fs) return;
+  if (!session) { C.records = []; loaded.r = 1; return; }
+  loaded.r = 0;
+  const col = fs.collection('records');
+  const merge = () => { const all = new Map(); Object.values(recordParts).flat().forEach(r => all.set(r.id, r)); C.records = [...all.values()]; loaded.r = 1; refresh(); };
+  const grab = (key, query) => recordUnsubs.push(query.onSnapshot(q => { recordParts[key] = q.docs.map(d => ({ ...d.data(), id: d.data().id || d.id })); merge(); }, fail));
+  if (session.role === 'student') { grab('today', col.where('date', '==', ymd(new Date()))); grab('mine', col.where('sn', '==', session.sn)); }
+  else grab('all', col);
 }
 function refresh() {
   if (!ready()) return;
@@ -236,7 +249,7 @@ async function login() {
     if (u.pw !== await hash(`${u.passwordKey || sn}:${p}`)) return say('Wrong username or password.');
     session = { role: 'student', sn, name: u.name, mustChangePassword: Boolean(u.mustChangePassword) };
   }
-  myGroup = ''; myStudentType = ''; signatureMessage = ''; keepSession(); msg = ''; render();
+  myGroup = ''; myStudentType = ''; signatureMessage = ''; keepSession(); msg = ''; startRecords(); render();
 }
 function studentNameParts(profile) {
   const words = String(profile.name || '').trim().split(/\s+/).filter(Boolean);
@@ -367,9 +380,9 @@ async function setupAdmin() {
   if (users().some(x => x.sn.toLowerCase() === user)) return say('That name is used by a student. Choose another.');
   if (p.length < 6) return say('Password must have at least 6 characters.');
   await saveSettings({ ...settings(), admins: [{ user, pw: await hash(user + ':' + p), role: 'admin' }] });
-  session = { role: 'admin', name: user, user }; keepSession(); msg = ''; render();
+  session = { role: 'admin', name: user, user }; keepSession(); msg = ''; startRecords(); render();
 }
-function logout() { session = null; localStorage.removeItem('pcreg_session'); pick = null; myGroup = ''; myStudentType = ''; myPersonalStudentType = ''; signatureMessage = ''; render(); }
+function logout() { session = null; localStorage.removeItem('pcreg_session'); startRecords(); pick = null; myGroup = ''; myStudentType = ''; myPersonalStudentType = ''; signatureMessage = ''; render(); }
 
 /* ---------- Location ---------- */
 function distance(a, b, c, d) {
@@ -1658,4 +1671,4 @@ function exportGroupPdf() {
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-b'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-c'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
