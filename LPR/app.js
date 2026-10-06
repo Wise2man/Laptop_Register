@@ -205,9 +205,20 @@ async function saveLoginSignature() {
   } catch (e) { $('signatureMessage').textContent = saveFail(e, 'save your signature'); }
 }
 const setTab = t => { tab = t; msg = ''; render(); };
+/* Firestore daily limits reset at midnight Pacific time. This works out that moment in the user's own clock. */
+function quotaResetInfo(now = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(now).map(x => [x.type, x.value]));
+  const secs = (Number(parts.hour) % 24) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
+  const reset = new Date(now.getTime() + (86400 - secs) * 1000), mins = Math.ceil((reset - now) / 60000);
+  const clock = reset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const day = reset.toDateString() === now.toDateString() ? 'today' : 'tomorrow';
+  const wait = mins >= 60 ? `${Math.floor(mins / 60)} hour(s) ${mins % 60} minute(s)` : `${mins} minute(s)`;
+  return { clock, day, wait };
+}
 function saveFail(e, what = 'save') {
   console.error('Save failed:', e);
   const code = (e && e.code) || '', text = (e && e.message) || '';
+  if (code === 'resource-exhausted') { const r = quotaResetInfo(); return `The system has reached its free daily limit, so you could not ${what}. Nothing was saved. Please try again after about ${r.clock} ${r.day} (in about ${r.wait}). If you cannot wait, tell the admin.`; }
   if (code === 'permission-denied') return `Could not ${what}: the database refused it (permission-denied). This is not your internet. The admin must check the Firebase rules (Firestore Database > Rules), because they may have expired.`;
   if (code === 'unavailable' || code === 'deadline-exceeded') return `Could not ${what}: cannot reach the database right now (${code}). Check your internet and try again.`;
   if (code === 'not-found') return `Could not ${what}: your account was not found in the database (not-found). Please ask an admin.`;
@@ -1671,4 +1682,4 @@ function exportGroupPdf() {
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-c'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-d'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
