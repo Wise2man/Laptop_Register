@@ -218,7 +218,7 @@ function quotaResetInfo(now = new Date()) {
 function saveFail(e, what = 'save') {
   console.error('Save failed:', e);
   const code = (e && e.code) || '', text = (e && e.message) || '';
-  if (code === 'resource-exhausted') { const r = quotaResetInfo(); return `The system has reached its free daily limit, so you could not ${what}. Nothing was saved. Please try again after about ${r.clock} ${r.day} (in about ${r.wait}). If you cannot wait, tell the admin.`; }
+  if (code === 'resource-exhausted') { const r = quotaResetInfo(); return `Please try again at ${r.clock} ${r.day}.`; }
   if (code === 'permission-denied') return `Could not ${what}: the database refused it (permission-denied). This is not your internet. The admin must check the Firebase rules (Firestore Database > Rules), because they may have expired.`;
   if (code === 'unavailable' || code === 'deadline-exceeded') return `Could not ${what}: cannot reach the database right now (${code}). Check your internet and try again.`;
   if (code === 'not-found') return `Could not ${what}: your account was not found in the database (not-found). Please ask an admin.`;
@@ -1682,4 +1682,4 @@ function exportGroupPdf() {
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-d'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-e'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
