@@ -189,7 +189,7 @@ async function saveLoginSignature() {
     const profile = users().find(u => u.sn === session.sn);
     if (profile) profile.signature = signature;
     signatureMessage = ''; signatureDrawn = false; render();
-  } catch (e) { $('signatureMessage').textContent = 'Could not save your signature. Check your internet and try again.'; }
+  } catch (e) { $('signatureMessage').textContent = saveFail(e, 'save your signature'); }
 }
 const setTab = t => { tab = t; msg = ''; render(); };
 function saveFail(e, what = 'save') {
@@ -1215,7 +1215,7 @@ async function sendReport() {
     await Promise.all(attachments.map(f => storage.ref(f.path).delete().catch(() => {})));
     say(e.message === 'week' ? `You already sent ${LIMIT_WEEK} reports this week. You can send again from next Monday.`
       : e.message === 'month' ? `You already sent ${LIMIT_MONTH} reports this month. You can send again next month.`
-      : 'Could not send. Check your internet.');
+      : saveFail(e, 'send the report'));
   }
 }
 const LIMIT_WEEK = 2, LIMIT_MONTH = 3;
@@ -1656,3 +1656,6 @@ function exportGroupPdf() {
 }
 
 start();
+
+/* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-b'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
