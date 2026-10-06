@@ -192,6 +192,14 @@ async function saveLoginSignature() {
   } catch (e) { $('signatureMessage').textContent = 'Could not save your signature. Check your internet and try again.'; }
 }
 const setTab = t => { tab = t; msg = ''; render(); };
+function saveFail(e, what = 'save') {
+  console.error('Save failed:', e);
+  const code = (e && e.code) || '', text = (e && e.message) || '';
+  if (code === 'permission-denied') return `Could not ${what}: the database refused it (permission-denied). This is not your internet. The admin must check the Firebase rules (Firestore Database > Rules), because they may have expired.`;
+  if (code === 'unavailable' || code === 'deadline-exceeded') return `Could not ${what}: cannot reach the database right now (${code}). Check your internet and try again.`;
+  if (code === 'not-found') return `Could not ${what}: your account was not found in the database (not-found). Please ask an admin.`;
+  return `Could not ${what} (${code || text || 'unknown error'}). If this keeps happening, send this message to the admin.`;
+}
 const say = (m, ok) => { msg = ok ? `<span class="good">${m}</span>` : m; render(); };
 
 async function signup() {
@@ -214,7 +222,7 @@ async function signup() {
     });
     if (exists) return say('This student number already has an account. Please log in.');
     tab = 'login'; say('Account created. You can log in now.', true);
-  } catch (e) { say('Could not save. Check your internet.'); }
+  } catch (e) { say(saveFail(e, 'create the account')); }
 }
 async function login() {
   const raw = $('s').value.trim(), p = $('p').value, ad = findAdmin(raw);
@@ -482,7 +490,7 @@ async function sign() {
         : { group: '', studentType, personalPCProgram: true, groupLocked: true });
     });
     pick = null; myPersonalStudentType = ''; render();
-  } catch (e) { pick = null; say(e.message === 'taken' ? 'This student already has an attendance record today, or that PC is taken.' : 'Could not save. Check your internet and try again.'); }
+  } catch (e) { pick = null; say(e.message === 'taken' ? 'This student already has an attendance record today, or that PC is taken.' : saveFail(e, 'sign in')); }
 }
 
 /* ---------- Admin ---------- */
@@ -697,7 +705,7 @@ async function removeRedFlag(sn) {
   const u = users().find(x => x.sn === sn);
   if (!u || !confirm(`Remove the red flag for ${u.name} for ${rfMonth}? No stipend deduction will be shown for them this month.`)) return;
   try { await fs.collection('users').doc(sn).update({ [`redFlagWaivers.${waiverKey(rfMonth)}`]: { by: session.user, at: Date.now() } }); }
-  catch (e) { say('Could not remove the flag. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'remove the flag')); }
 }
 const excludedStudents = () => users().filter(u => u.redFlagExcluded && attendanceTypeForProfile(u) === STUDENT_CATEGORY).sort((a, b) => String(a.name).localeCompare(String(b.name)));
 function excludedSection() {
@@ -710,24 +718,24 @@ async function excludeFromRedFlags(sn) {
   const u = users().find(x => x.sn === sn);
   if (!u || !confirm(`Remove ${u.name} from the red flag list for all months? You can put them back later.`)) return;
   try { await fs.collection('users').doc(sn).update({ redFlagExcluded: true, redFlagExcludedBy: session.user }); }
-  catch (e) { say('Could not remove the student. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'remove the student')); }
 }
 async function restoreToRedFlagList(sn) {
   if (!canManageFlags()) return;
   try { const del = firebase.firestore.FieldValue.delete(); await fs.collection('users').doc(sn).update({ redFlagExcluded: del, redFlagExcludedBy: del }); }
-  catch (e) { say('Could not put the student back. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'put the student back')); }
 }
 async function restoreRedFlag(sn) {
   if (!canManageFlags()) return;
   try { await fs.collection('users').doc(sn).update({ [`redFlagWaivers.${waiverKey(rfMonth)}`]: firebase.firestore.FieldValue.delete() }); }
-  catch (e) { say('Could not restore the flag. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'restore the flag')); }
 }
 async function saveRedFlagRules() {
   if (!hasPermission('redflagRules')) return;
   const offDays = $('rfOff').value.split(/[,\s]+/).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
   const redFlag = { maxAbsent: Math.max(0, Number($('rfMax').value) || 0), deductPercent: Math.min(100, Math.max(0, Number($('rfPct').value) || 0)), stipend: Math.max(0, Number($('rfStipend').value) || 0), offDays };
   try { await saveSettings({ ...settings(), redFlag }); C.settings.redFlag = redFlag; say('Red flag rules saved.', true); }
-  catch (e) { say('Could not save the rules. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'save the rules')); }
 }
 function exportRedFlags() {
   const cfg = rfSettings(), rows = absenceReport(rfMonth);
@@ -1400,7 +1408,7 @@ async function decide(id, status) {
   if (note === null) return;
   await fs.collection('reports').doc(id).update({ status, note: note.trim(), decidedBy: session.user });
   const report = C.reports.find(x => x.id === id);
-  if (report) { try { await syncExcusedAttendance(report, status); } catch (e) { say('The report was saved, but the register could not be updated. Check your internet and press the button again.'); } }
+  if (report) { try { await syncExcusedAttendance(report, status); } catch (e) { say('The report was saved, but the register could not be updated. ' + saveFail(e, 'update the register')); } }
 }
 // An approved report puts the student in the register as attended (with signature, group and type). Rejecting it removes that entry.
 async function syncExcusedAttendance(report, status) {
@@ -1417,7 +1425,7 @@ async function addApprovedToRegister() {
   if (!hasPermission('reports')) return;
   const list = liveReports().filter(r => r.status === 'approved');
   try { for (const r of list) await syncExcusedAttendance(r, 'approved'); say(`${list.length} approved report(s) checked and added to the register.`, true); }
-  catch (e) { say('Could not update the register. Check your internet.'); }
+  catch (e) { say(saveFail(e, 'update the register')); }
 }
 async function delReport(id) {
   if (!hasPermission('reports') || !confirm('Delete this report?')) return;
