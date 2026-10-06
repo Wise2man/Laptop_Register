@@ -413,6 +413,7 @@ const studentProfile = () => users().find(u => u.sn === session.sn) || {};
 const assignedGroup = () => studentProfile().group || '';
 const groupLocked = () => Boolean(studentProfile().group || studentProfile().groupLocked);
 const LEGACY_PERSONAL_GROUP = 'Lab Personal PC';
+const LAB_GROUP = 'LAB'; // group for people in a student type other than "Student" who sign in on a lab PC
 const isLegacyPersonalGroup = group => {
   const value = String(group || '').trim().toLowerCase(), prefix = LEGACY_PERSONAL_GROUP.toLowerCase();
   return value === prefix || value.startsWith(prefix + ' ') || value.startsWith(prefix + '-') || value.startsWith(prefix + '(');
@@ -447,9 +448,10 @@ const isP = r => r.personal || r.pc === 'Personal' || r.excused; // excused reco
 const noPcText = r => r.excused ? 'Excused (approved report)' : 'Personal PC';
 const pcLabel = r => r.excused ? 'Excused' : !hasRecordedPc(r.pc) ? 'Not recorded' : r.pc === 'Personal' ? 'Personal' : r.personal ? `${r.pc} (personal)` : r.pc;
 const attendanceStudentType = r => r.studentType || (isLegacyPersonalGroup(r.group) && (users().find(u => u.sn === r.sn) || {}).studentType) || (r.group && !isLegacyPersonalGroup(r.group) ? STUDENT_CATEGORY : '');
-const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStudentType(r) || 'Student type needed') : r.group ? groupLabel(r.group, r.groupYear) : attendanceStudentType(r);
+const attendanceCategory = r => isLegacyPersonalGroup(r.group) ? (attendanceStudentType(r) || 'Student type needed') : r.group === LAB_GROUP && r.studentType && r.studentType !== STUDENT_CATEGORY ? `${r.studentType} (${LAB_GROUP})` : r.group ? groupLabel(r.group, r.groupYear) : attendanceStudentType(r);
 
 /* ---------- Student ---------- */
+let useLabGroup = true;
 const taken = (date, pc) => records().find(r => r.date === date && r.pc === pc && !r.returnedAt);
 function studentView() {
   const today = ymd(new Date()), total = settings().totalPCs, profile = studentProfile();
@@ -458,7 +460,7 @@ function studentView() {
   let top;
   if (!isWeekday(new Date())) top = `<p>The register is open Monday to Friday only. Today is ${dayName(today)}.</p>`;
     else if (mine) top = `<p>${mine.returnedAt ? 'Attendance recorded; PC returned' : 'Today you are holding'}</p><div class="big">${isP(mine) ? 'Personal PC' + (mine.pc === 'Personal' ? '' : ' ' + mine.pc) : `PC ${pcLabel(mine)}`}</div>
-      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}${mine.returnedAt ? `; returned at ${new Date(mine.returnedAt).toLocaleTimeString()}` : ''}. You cannot sign in again today.`}${mine.studentType ? ' Student type: ' + esc(mine.studentType) + '.' : mine.group ? ' Group: ' + esc(groupLabel(mine.group, mine.groupYear)) + '.' : ''}</p>`;
+      <p>${isP(mine) ? 'You are using your own PC today. Only the admin can change this.' : `Signed at ${mine.time}${mine.returnedAt ? `; returned at ${new Date(mine.returnedAt).toLocaleTimeString()}` : ''}. You cannot sign in again today.`}${mine.studentType ? ' Student type: ' + esc(mine.studentType) + '.' + (mine.group === LAB_GROUP ? ' Group: ' + LAB_GROUP + '.' : '') : mine.group ? ' Group: ' + esc(groupLabel(mine.group, mine.groupYear)) + '.' : ''}</p>`;
   else {
     let cells = '';
     for (let i = 1; i <= total; i++) cells += `<button class="pc ${pick === i ? 'sel' : ''}" ${taken(today, i) ? 'disabled' : ''} onclick="choose(${i})">${i}</button>`;
@@ -470,7 +472,7 @@ function studentView() {
       ? assignedGroup() ? `<p>Your group: <b>${esc(groupLabel(assignedGroup()))}</b> (ask an admin to change it)</p>`
         : groupLocked() ? '<p class="err">Your group has not been assigned. Please ask an admin.</p>'
           : (settings().groups || []).some(group => !isLegacyPersonalGroup(group)) ? `<label for="grp">Your group</label><select id="grp" onchange="myGroup=this.value"><option value="">Choose your group</option>${settings().groups.filter(group => !isLegacyPersonalGroup(group)).map(group => `<option value="${esc(group)}" ${group === myGroup ? 'selected' : ''}>${esc(groupLabel(group))}</option>`).join('')}</select>` : '<p class="err">The admin has not added groups yet.</p>'
-      : '';
+      : category && !personalPick ? `<label for="labGroup">Group</label><select id="labGroup" onchange="useLabGroup = this.value === 'LAB'"><option value="LAB" ${useLabGroup ? 'selected' : ''}>LAB</option><option value="" ${useLabGroup ? '' : 'selected'}>No group</option></select>` : '';
     top = `<p>Pick the PC you are taking. Once you sign, only the admin can change it. You must be at the lab to sign, so allow location when the browser asks.</p>
       <div class="grid">${cells}</div>
       ${pcells ? `<p>Using your own PC? Pick a personal PC number:</p><div class="grid">${pcells}</div>` : ''}
@@ -490,7 +492,7 @@ async function sign() {
   const personalPick = personalNums().includes(pick);
   const studentType = personalPick ? myPersonalStudentType : myStudentType || attendanceTypeForProfile(studentProfile());
   if (personalPick && !studentType) return say('Choose a student type for the personal PC sign-in.');
-  const grp = studentType === STUDENT_CATEGORY ? assignedGroup() || (groupLocked() ? '' : myGroup) : '';
+  const grp = studentType === STUDENT_CATEGORY ? assignedGroup() || (groupLocked() ? '' : myGroup) : (!personalPick && useLabGroup ? LAB_GROUP : '');
   if (!studentType) return say('Please choose your student type.');
   if (studentType === STUDENT_CATEGORY && !grp) return say(groupLocked() ? 'Your group has not been assigned. Please ask an admin.' : 'Please choose your group.');
   const lab = settings().lab;
@@ -579,6 +581,7 @@ function userInScope(scope, u) {
 function scopeEntries(extra = []) {
   const groups = (settings().groups || []).filter(g => !isLegacyPersonalGroup(g));
   extra.forEach(r => { if (r.group && !isLegacyPersonalGroup(r.group) && !groups.includes(r.group)) groups.push(r.group); });
+  if (!groups.includes(LAB_GROUP)) groups.push(LAB_GROUP);
   const types = studentTypes();
   extra.forEach(r => { const t = attendanceStudentType(r); if (t && !types.includes(t)) types.push(t); });
   return [
@@ -685,21 +688,127 @@ function adminGroupDetails() {
     <div><label for="groupWhatsAppDetail">WhatsApp invite link</label><input id="groupWhatsAppDetail" type="url" placeholder="https://chat.whatsapp.com/..." value="${esc(groupWhatsAppUrl(selectedGroup))}" onchange="setGroupWhatsAppLink(${i}, this.value)"></div></div>
     <h3>Students</h3>${members.length ? `<ul>${members.map(u => `<li>${hasPermission('students') ? `<a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a>` : `${esc(u.name)} (${esc(u.sn)})`}</li>`).join('')}</ul>` : '<p>No students are assigned to this group.</p>'}
     ${hasPermission('attendance') ? `<h3>Attendance history</h3>${table(history, true)}` : ''}
+    ${registerLogosCard(logoKeyFor(STUDENT_CATEGORY, selectedGroup))}
     ${registerGridCard(STUDENT_CATEGORY, selectedGroup)}
     <button class="sm" onclick="composeUpdate(this.dataset.target)" data-target="g:${esc(selectedGroup)}">Send an update to this group</button>
     <button class="sm alt" onclick="removeGroup(${i})">Remove group</button>
     <button class="sm alt" onclick="selectedGroup = ''; render()">Close details</button></div>`;
 }
+/* ---------- Register logos (top of the Word attendance register) ---------- */
+const logoKeyFor = (type, group) => group ? 'g:' + group : 't:' + type;
+const registerLogos = key => (settings().registerLogos || {})[key] || {};
+function readLogoFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\/(png|jpe?g|gif|webp)$/i.test(file.type)) return reject(new Error('type'));
+    if (file.size > 5 * 1024 * 1024) return reject(new Error('size'));
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const sizes = [[300, 110], [220, 80], [160, 60]];
+      for (let i = 0; i < sizes.length; i++) {
+        const scale = Math.min(1, sizes[i][0] / img.width, sizes[i][1] / img.height);
+        const w = Math.max(1, Math.round(img.width * scale)), h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const data = canvas.toDataURL('image/png');
+        if (data.length <= 70000 || i === sizes.length - 1) return resolve({ data, w, h });
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('read')); };
+    img.src = url;
+  });
+}
+async function persistLogos(all) {
+  const next = { ...settings(), registerLogos: all };
+  if (JSON.stringify(next).length > 900000) throw new Error('full');
+  await saveSettings(next);
+}
+const logoError = e => ({ type: 'Choose a PNG, JPG, GIF or WebP image.', size: 'That image is too big. Use one under 5 MB.', full: 'There is no room for more logos. Remove a logo from another group first.', read: 'That image could not be read.' }[e && e.message] || 'Could not save the logo.');
+async function setRegisterLogo(key, slot, input) {
+  if (!hasPermission('groups')) return;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const logo = await readLogoFile(file), all = { ...(settings().registerLogos || {}) };
+    all[key] = { ...(all[key] || {}), [slot]: logo };
+    await persistLogos(all);
+    say('Logo saved.', true);
+  } catch (e) { say(logoError(e)); }
+  input.value = '';
+}
+async function removeRegisterLogo(key, slot) {
+  if (!hasPermission('groups')) return;
+  const all = { ...(settings().registerLogos || {}) }, mine = { ...(all[key] || {}) };
+  delete mine[slot];
+  if (Object.keys(mine).some(k => k === 'sasseta' || k === 'company')) all[key] = mine; else delete all[key];
+  try { await persistLogos(all); say('Logo removed.', true); } catch (e) { say(logoError(e)); }
+}
+async function setLogoSide(key, value) {
+  if (!hasPermission('groups')) return;
+  const all = { ...(settings().registerLogos || {}) };
+  all[key] = { ...(all[key] || {}), swap: value === 'swap' };
+  try { await persistLogos(all); say('Logo positions saved.', true); } catch (e) { say(logoError(e)); }
+}
+async function copySassetaLogoToAll(key) {
+  if (!hasPermission('groups')) return;
+  const logo = registerLogos(key).sasseta;
+  if (!logo) return say('Add the SASSETA logo here first.');
+  if (!confirm('Use this SASSETA logo for every group and student type? Their own SASSETA logos will be replaced.')) return;
+  const keys = [...(settings().groups || []).filter(g => !isLegacyPersonalGroup(g)).map(g => logoKeyFor(STUDENT_CATEGORY, g)), logoKeyFor(STUDENT_CATEGORY, LAB_GROUP), ...studentTypes().filter(t => t !== STUDENT_CATEGORY).map(t => logoKeyFor(t, ''))];
+  const all = { ...(settings().registerLogos || {}) };
+  keys.forEach(k => { all[k] = { ...(all[k] || {}), sasseta: logo }; });
+  try { await persistLogos(all); say('SASSETA logo set for every group and student type.', true); } catch (e) { say(logoError(e)); }
+}
+function registerLogosCard(key) {
+  if (!hasPermission('groups')) return '';
+  const l = registerLogos(key), attr = `data-key="${esc(key)}"`;
+  const slot = (id, label) => `<div><label for="logo-${id}">${label}</label>
+    ${l[id] ? `<div><img src="${esc(l[id].data)}" alt="${label}" style="max-height:60px;max-width:200px;background:#fff;border:1px solid var(--line);padding:4px"></div>` : '<p>No logo yet.</p>'}
+    <input id="logo-${id}" type="file" accept="image/png,image/jpeg,image/gif,image/webp" ${attr} onchange="setRegisterLogo(this.dataset.key, '${id}', this)">
+    ${l[id] ? `<button class="sm alt" ${attr} onclick="removeRegisterLogo(this.dataset.key, '${id}')">Remove</button>` : ''}
+    ${id === 'sasseta' && l[id] ? `<button class="sm alt" ${attr} onclick="copySassetaLogoToAll(this.dataset.key)">Use for every group</button>` : ''}</div>`;
+  return `<h3>Logos for the Word register</h3>
+    <p>These two logos go at the top of this group's Word attendance register, one on each side.</p>
+    <div class="row">${slot('sasseta', 'SASSETA logo')}${slot('company', 'Company logo')}
+    <div><label for="logoSide">Positions</label><select id="logoSide" ${attr} onchange="setLogoSide(this.dataset.key, this.value)"><option value="normal" ${l.swap ? '' : 'selected'}>SASSETA on the left, company on the right</option><option value="swap" ${l.swap ? 'selected' : ''}>SASSETA on the right, company on the left</option></select></div></div>`;
+}
+function wordLogoImage(logo) {
+  if (!logo || !logo.data || !logo.data.startsWith('data:image/png;base64,') || !logo.w || !logo.h) return null;
+  const data = Uint8Array.from(atob(logo.data.split(',')[1]), character => character.charCodeAt(0));
+  let h = Math.min(60, logo.h), w = Math.round(h * logo.w / logo.h);
+  if (w > 200) { w = 200; h = Math.round(w * logo.h / logo.w); }
+  return new docx.ImageRun({ data, transformation: { width: w, height: h } });
+}
+function wordLogoHeader(key) {
+  const l = registerLogos(key), left = wordLogoImage(l.swap ? l.company : l.sasseta), right = wordLogoImage(l.swap ? l.sasseta : l.company);
+  if (!left && !right) return null;
+  const none = { style: docx.BorderStyle.NONE, size: 0, color: 'FFFFFF' }, borders = { top: none, bottom: none, left: none, right: none };
+  const cell = (image, alignment) => new docx.TableCell({ width: { size: 7420, type: docx.WidthType.DXA }, borders, children: [new docx.Paragraph({ alignment, children: image ? [image] : [] })] });
+  return new docx.Table({
+    width: { size: 14840, type: docx.WidthType.DXA }, columnWidths: [7420, 7420],
+    borders: { ...borders, insideHorizontal: none, insideVertical: none },
+    rows: [new docx.TableRow({ children: [cell(left, docx.AlignmentType.LEFT), cell(right, docx.AlignmentType.RIGHT)] })]
+  });
+}
+function labDetails() {
+  return `<div class="card" id="typeDetails"><h2>${LAB_GROUP}</h2>
+    <p>The group for people in a student type other than "Student" (for example interns) who sign in on a lab PC. It is built in, so it cannot be renamed or removed.</p>
+    ${registerLogosCard(logoKeyFor(STUDENT_CATEGORY, LAB_GROUP))}
+    ${registerGridCard(STUDENT_CATEGORY, LAB_GROUP)}
+    <button class="sm alt" onclick="selectedType = ''; render()">Close details</button></div>`;
+}
 function otherGroupsCard() {
   const types = studentTypes().filter(t => t !== STUDENT_CATEGORY);
   return `<div class="card"><h2>Other groups (student types)</h2>
     <p>People who are not in a regular group, such as interns. Open one to see its people and register, change its name, or send it an update.</p>
+    <ul class="link-list"><li><a href="#typeDetails" onclick="viewType(this.dataset.type); return false" data-type="${LAB_GROUP}">${LAB_GROUP}</a><span>${new Set(records().filter(r => r.group === LAB_GROUP).map(r => r.sn)).size} people have signed in as LAB</span></li></ul>
     ${types.length ? `<ul class="link-list">${types.map(t => `<li><a href="#typeDetails" onclick="viewType(this.dataset.type); return false" data-type="${esc(t)}">${esc(t)}</a><span>${users().filter(u => attendanceTypeForProfile(u) === t).length} people</span></li>`).join('')}</ul>` : '<p>None yet.</p>'}
     <label for="newStudentType">New other group / student type</label><input id="newStudentType" maxlength="50">
     <button onclick="addStudentType()">Add</button></div>`;
 }
 function adminTypeDetails() {
   const type = selectedType;
+  if (type === LAB_GROUP) return labDetails();
   if (!type || type === STUDENT_CATEGORY || !studentTypes().includes(type)) return '';
   const members = users().filter(u => attendanceTypeForProfile(u) === type);
   const history = hasPermission('attendance') ? records().filter(r => attendanceStudentType(r) === type)
@@ -710,6 +819,7 @@ function adminTypeDetails() {
     <button class="sm" onclick="renameStudentType()">Save name</button>
     <p class="download-progress">Renaming also updates the people and old sign-ins that use this name.</p>
     <h3>People</h3>${members.length ? `<ul>${members.map(u => `<li>${hasPermission('students') ? `<a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a>` : `${esc(u.name)} (${esc(u.sn)})`}</li>`).join('')}</ul>` : '<p>Nobody is in this group yet.</p>'}
+    ${registerLogosCard(logoKeyFor(type, ''))}
     ${registerGridCard(type, '')}
     ${hasPermission('attendance') ? `<h3>Attendance history</h3>${table(history.slice(0, 100), true)}${history.length > 100 ? `<p>Showing the latest 100 of ${history.length}.</p>` : ''}` : ''}
     <button class="sm" onclick="composeUpdate(this.dataset.target)" data-target="t:${esc(type)}">Send an update to this group</button>
@@ -747,7 +857,7 @@ function adminRecordDetails() {
     <p>${rec.date} (${dayName(rec.date)}) · ${esc(attendanceCategory(rec))} · ${pcLabel(rec)}</p>
     <p>Signed in: ${esc(rec.time || 'Not recorded')}<br>Returned: ${rec.returnedAt ? `${esc(new Date(rec.returnedAt).toLocaleString())} · marked by ${esc(rec.returnedBy || 'Staff not recorded')}` : isP(rec) ? noPcText(rec) : 'Not returned'}</p>
     <p>Signature: ${rec.signature ? `<img src="${esc(rec.signature)}" alt="Signature of ${esc(rec.name)}" style="width:180px;height:64px;object-fit:contain">` : 'Not captured'}</p>
-    ${isP(rec) ? '' : `<button class="sm" onclick="returnPc('${esc(rec.id)}')">Record return</button><button class="sm" onclick="editPc('${esc(rec.id)}')">Change PC</button>`}
+    ${isP(rec) ? '' : `<button class="sm" onclick="returnPc('${esc(rec.id)}')">Record return</button>`}${rec.excused ? '' : `<button class="sm" onclick="editPc('${esc(rec.id)}')">Change PC</button>`}
     <button class="sm alt" onclick="removeRec('${esc(rec.id)}')">Remove sign-in</button>
     <button class="sm alt" onclick="selectedRecordId = ''; render()">Close details</button></div>`;
 }
@@ -958,10 +1068,10 @@ function adminView() {
   ${hasPermission('attendance') ? `<section class="${panel('mark-personal')}" role="tabpanel"><div class="card"><h2>Mark personal PC</h2>
     <p>Mark a student who is using their own PC. They will not pick a lab PC on that day.</p>
     <div class="row"><div><label for="pp">Student</label><select id="pp">${users().map(u => `<option value="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</option>`).join('')}</select></div>
-    <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}"></div>
+    <div><label for="pd">Date</label><input id="pd" type="date" value="${ymd(new Date())}" onchange="refreshPersonalPcOptions()"></div>
     <div><label for="personalType">Student type</label><select id="personalType"><option value="">Choose a type</option>${studentTypes().map(type => `<option value="${esc(type)}">${esc(type)}</option>`).join('')}</select></div>
     <div><label for="pg">Group</label><select id="pg"><option value="">(none)</option>${groups.map(g => `<option value="${esc(g)}">${esc(groupLabel(g))}</option>`).join('')}</select></div>
-    <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => `<option>${n}</option>`).join('')}</select></div></div>
+    <div><label for="pn">Personal PC number</label><select id="pn"><option value="">No number</option>${personalNums().map(n => taken(ymd(new Date()), n) ? `<option value="${n}" disabled>${n} (taken)</option>` : `<option>${n}</option>`).join('')}</select></div></div>
     <button onclick="markPersonal()">Mark as personal PC</button></div></section>` : ''}
   ${hasPermission('attendance') ? `<section class="${panel('personal-week')}" role="tabpanel"><div class="card"><h2>Using a personal PC this week</h2>
     ${personal.length ? `<div class="wrap"><table><tr><th>Date</th><th>Student</th><th>PC</th><th></th></tr>${personal.map(r =>
@@ -982,7 +1092,8 @@ function adminView() {
     <div><label for="studentSearchQuery">Find student</label><input id="studentSearchQuery" value="${esc(studentSearch.query)}" placeholder="Enter a name, number, group, or type"></div></div>
     <button onclick="applyStudentSearch()">Search</button><button class="alt" onclick="clearStudentSearch()">Clear</button>
     ${visibleStudents.length ? `<p>${visibleStudents.length} student(s) found.</p><ul>${visibleStudents.map(u => `<li><a href="#studentDetails" onclick="viewStudent(this.dataset.sn); return false" data-sn="${esc(u.sn)}">${esc(u.name)} (${esc(u.sn)})</a> · ${esc(u.group ? groupLabel(u.group) : u.studentType || 'No group or type')}</li>`).join('')}</ul>${adminStudentDetails()}` : '<p>No students match that search.</p>'}</div></section>` : ''}
-  ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel">${onExports ? exportsCard(exportBounds, exportList, exportBuckets) : ''}</section>` : ''}`;
+  ${hasPermission('attendance') ? `<section class="${panel('exports')}" role="tabpanel">${onExports ? exportsCard(exportBounds, exportList, exportBuckets) : ''}</section>` : ''}
+  ${pcEditModal()}`;
 }
 function scopeOptionsHtml() {
   const entries = scopeEntries(records()), opt = e => `<option value="${esc(e.id)}" ${range.scope === e.id ? 'selected' : ''}>${esc(e.label)}</option>`;
@@ -1139,6 +1250,7 @@ function addGroup() {
   const g = $('gn').value.trim(), gr = settings().groups || [];
   if (!g) return say('Type a group name.');
   if (isLegacyPersonalGroup(g)) return say('Lab Personal PC is a student type category, not a group.');
+  if (g.toLowerCase() === LAB_GROUP.toLowerCase()) return say('LAB is built in. It is the group for people in other student types who sign in on a lab PC.');
   if (gr.some(x => x.toLowerCase() === g.toLowerCase())) return say('That group already exists.');
   saveSettings({ ...settings(), groups: [...gr, g] }).then(() => say('Group added.', true), () => say('Could not save.'));
 }
@@ -1200,6 +1312,17 @@ async function renameStudentType() {
     selectedType = name;
     say(`Renamed to "${name}".`, true);
   } catch (e) { say('Could not finish renaming. Nothing was lost; try again.'); }
+}
+function refreshPersonalPcOptions() {
+  const date = $('pd') && $('pd').value, select = $('pn');
+  if (!select) return;
+  [...select.options].forEach(option => {
+    const n = parseInt(option.value, 10);
+    if (!n) return;
+    option.disabled = !!(date && taken(date, n));
+    option.textContent = option.disabled ? `${n} (taken)` : String(n);
+    if (option.disabled && select.value === option.value) select.value = '';
+  });
 }
 async function markPersonal() {
   if (!hasPermission('attendance')) return;
@@ -1313,7 +1436,7 @@ function table(list, admin) {
     list.map(r => `<tr><td>${r.date}</td><td>${esc(r.name)} (${esc(r.sn)})</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.returnedAt ? `Returned${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? noPcText(r) : 'Not returned'}</td><td><a href="#recordDetails" onclick="viewRecord(this.dataset.id); return false" data-id="${esc(r.id)}">View details</a></td></tr>`).join('') + '</table></div>';
   return `<table><tr><th>Date</th><th>Day</th><th>Student no.</th><th>Name</th><th>Group / type</th><th>PC</th><th>Signed in</th><th>Returned at</th><th>Signature</th>${admin ? '<th>Actions</th>' : ''}</tr>` +
     list.map(r => `<tr><td>${r.date}</td><td>${dayName(r.date)}</td><td>${esc(r.sn)}</td><td>${esc(r.name)}</td><td>${esc(attendanceCategory(r))}</td><td>${pcLabel(r)}</td><td>${r.time}</td><td>${r.returnedAt ? `${esc(new Date(r.returnedAt).toLocaleString())}${r.returnedBy ? `<br><small>Marked by ${esc(r.returnedBy)}</small>` : '<br><small>Staff not recorded</small>'}` : isP(r) ? noPcText(r) : admin ? `<button class="sm" onclick="returnPc('${r.id}')">Record return</button>` : 'Checked out'}</td><td>${r.signature ? `<img src="${esc(r.signature)}" alt="Signature of ${esc(r.name)}" style="width:100px;height:36px;object-fit:contain">` : 'Not captured'}</td>` +
-      (admin ? `<td>${isP(r) ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
+      (admin ? `<td>${r.excused ? '' : `<button class="sm" onclick="editPc('${r.id}')">Change PC</button>`}<button class="sm alt" onclick="removeRec('${r.id}')">Remove</button></td>` : '') + '</tr>').join('') + '</table>';
 }
 async function returnPc(id) {
   if (!hasPermission('attendance')) return;
@@ -1330,26 +1453,52 @@ async function returnPc(id) {
     say(`Return recorded at ${new Date(returnedAt).toLocaleTimeString()}.`, true);
   } catch (e) { say(e.message === 'returned' ? 'This PC has already been returned.' : 'Could not record the return.'); }
 }
-async function editPc(id) {
+let pcEditId = '';
+function editPc(id) {
   if (!hasPermission('attendance')) return;
-  const rec = records().find(x => x.id === id); if (!rec) return;
-  const v = prompt(`New PC number for ${rec.name} (1 to ${settings().totalPCs}):`, rec.pc);
-  if (v === null) return;
-  const n = parseInt(v, 10);
-  if (!n || n < 1 || n > settings().totalPCs) return say('That PC number does not exist.');
-  if (n === rec.pc) return;
-  const oref = fs.collection('records').doc(rec.id), oldSlot = fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`), newSlot = fs.collection('slots').doc(`${rec.date}_pc${n}`), legacyRef = fs.collection('records').doc(`${rec.date}_pc${n}`);
+  const rec = records().find(x => x.id === id);
+  if (!rec || rec.excused) return;
+  pcEditId = id; render();
+}
+function pcEditModal() {
+  const rec = pcEditId && records().find(r => r.id === pcEditId);
+  if (!rec || rec.excused || !hasPermission('attendance')) return '';
+  const personal = isP(rec), nums = personal ? personalNums() : Array.from({ length: settings().totalPCs }, (_, i) => i + 1);
+  const cells = nums.map(n => {
+    const current = String(rec.pc) === String(n), busy = !current && !!taken(rec.date, n);
+    return `<button class="pc ${current ? 'sel' : ''}" ${busy ? 'disabled title="Taken on this day"' : ''} onclick="setPcNumber('${esc(rec.id)}', ${n})">${n}</button>`;
+  }).join('');
+  return `<div class="modal-back" role="dialog" aria-modal="true" aria-label="Change PC number"><div class="modal card">
+    <h2>Change ${personal ? 'personal ' : ''}PC number</h2>
+    <p><b>${esc(rec.name)}</b> · ${esc(rec.date)} · now ${esc(pcLabel(rec))}</p>
+    <p>${personal ? 'Personal PC numbers' : 'Lab PCs'} that are taken on that day are greyed out.</p>
+    ${nums.length ? `<div class="grid">${cells}</div>` : '<p>There are no numbers to choose from.</p>'}
+    ${personal && rec.pc !== 'Personal' ? `<button class="sm" onclick="setPcNumber('${esc(rec.id)}', 'Personal')">No number (own PC)</button>` : ''}
+    <button class="sm alt" onclick="pcEditId = ''; render()">Cancel</button></div></div>`;
+}
+async function setPcNumber(id, value) {
+  if (!hasPermission('attendance')) return;
+  const rec = records().find(x => x.id === id);
+  if (!rec || rec.excused) return;
+  const personal = isP(rec), noNumber = value === 'Personal', n = noNumber ? 'Personal' : parseInt(value, 10);
+  if (noNumber ? !personal : !n || (personal ? !personalNums().includes(n) : n < 1 || n > settings().totalPCs)) return say('That PC number does not exist.');
+  if (String(n) === String(rec.pc)) { pcEditId = ''; return render(); }
+  if (!noNumber && taken(rec.date, n)) return say(`PC ${n} is already taken on that day.`);
+  const oref = fs.collection('records').doc(rec.id);
+  const oldSlot = hasRecordedPc(rec.pc) && rec.pc !== 'Personal' ? fs.collection('slots').doc(`${rec.date}_pc${rec.pc}`) : null;
+  const newSlot = noNumber ? null : fs.collection('slots').doc(`${rec.date}_pc${n}`), legacyRef = noNumber ? null : fs.collection('records').doc(`${rec.date}_pc${n}`);
   try {
     await fs.runTransaction(async tx => {
-      const current = await tx.get(oref), targetSlot = await tx.get(newSlot), legacy = await tx.get(legacyRef), sourceSlot = await tx.get(oldSlot);
-      if (!current.exists || targetSlot.exists && targetSlot.data().recordId !== id || legacy.exists && legacy.id !== id && !legacy.data().returnedAt) throw new Error('taken');
+      const current = await tx.get(oref), targetSlot = newSlot ? await tx.get(newSlot) : null, legacy = legacyRef ? await tx.get(legacyRef) : null, sourceSlot = oldSlot ? await tx.get(oldSlot) : null;
+      if (!current.exists || (targetSlot && targetSlot.exists && targetSlot.data().recordId !== id) || (legacy && legacy.exists && legacy.id !== id && !legacy.data().returnedAt)) throw new Error('taken');
       tx.update(oref, { pc: n });
       if (!rec.returnedAt) {
-        if (sourceSlot.exists && sourceSlot.data().recordId === id) tx.delete(oldSlot);
-        tx.set(newSlot, { recordId: id });
+        if (sourceSlot && sourceSlot.exists && sourceSlot.data().recordId === id) tx.delete(oldSlot);
+        if (newSlot) tx.set(newSlot, { recordId: id });
       }
     });
-    say('PC number changed.', true);
+    pcEditId = '';
+    say(noNumber ? 'Number removed. This is now an own-PC sign-in.' : 'PC number changed.', true);
   } catch (e) { say(e.message === 'taken' ? `PC ${n} is already taken on that day.` : 'Could not save.'); }
 }
 async function removeRec(id) {
@@ -1798,12 +1947,14 @@ function wordCategoryForRecord(record) {
   const profile = users().find(user => user.sn === record.sn);
   return profile ? wordCategoryForUser(profile) : '';
 }
+const isLabRegister = (type, group) => type === STUDENT_CATEGORY && group === LAB_GROUP;
 function matchesWordRegister(record, type, group) {
+  if (isLabRegister(type, group)) return record.group === LAB_GROUP;
   return wordCategoryForRecord(record) === type && (type !== STUDENT_CATEGORY || !group || record.group === group);
 }
 function wordRegisterRoster(type, group, registerRecords) {
   const roster = new Map();
-  users().filter(user => wordCategoryForUser(user) === type && (type !== STUDENT_CATEGORY || !group || user.group === group))
+  users().filter(user => !isLabRegister(type, group) && wordCategoryForUser(user) === type && (type !== STUDENT_CATEGORY || !group || user.group === group))
     .forEach(user => roster.set(user.sn, user));
   registerRecords.filter(record => matchesWordRegister(record, type, group)).forEach(record => {
     if (!roster.has(record.sn)) roster.set(record.sn, { sn: record.sn, name: record.name });
@@ -1880,7 +2031,9 @@ async function buildWordRegister(type, group) {
   const roster = wordRegisterRoster(type, group, registerRecords);
   const b = rangeBounds(), start = mondayOf(b.from), end = parse(b.to);
   const title = type === STUDENT_CATEGORY ? (group ? groupLabel(group) : 'All students') : type;
+  const logoHeader = wordLogoHeader(logoKeyFor(type, group));
   const children = [
+    ...(logoHeader ? [logoHeader] : []),
     new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: `${title.toUpperCase()} ATTENDANCE REGISTER`, bold: true, size: 28 })] }),
     new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: periodLabel(), bold: true, size: 22 })] }),
     new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: `${roster.length} ${roster.length === 1 ? 'learner' : 'learners'} in this register`, size: 20 })] })
@@ -1988,4 +2141,4 @@ function exportGroupPdf() {
 start();
 
 /* Version label: if you do not see this at the bottom of the page, your browser is still using an old copy */
-(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-g'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
+(() => { const v = document.createElement('div'); v.textContent = 'Version 2026-10-06-h'; v.style.cssText = 'text-align:center;font-size:11px;opacity:.5;padding:8px'; document.body.appendChild(v); })();
